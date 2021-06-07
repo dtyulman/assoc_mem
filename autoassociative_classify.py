@@ -1,13 +1,15 @@
+#built-in
 from collections import defaultdict
 
+#third-party
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.data import Dataset
-from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 
+#custom
 from utils import Timer
+import plots
+import data
 
 
 class ModernHopfield(nn.Module):
@@ -39,27 +41,7 @@ class ModernHopfield(nn.Module):
         return state
 
 
-class AutoassociativeDataset(Dataset):
-    """
-    Convert a dataset with (input, target) pairs to work with autoassociative
-    memory networks, returning (aa_input, aa_target) pairs, where
-    aa_input = [input, init] and aa_target = [input, target]
-    """
-    def __init__(self, dataset, output_init_value=0):
-        self.dataset = dataset
-        self.output_init_value = output_init_value
-        self.input_size = dataset[0][0].numel() # Mv
-        self.target_size = dataset[0][1].numel() # Mc
 
-    def __getitem__(self, idx):
-        input, target = self.dataset[idx]
-        output_init = torch.full_like(target, self.output_init_value)
-        aa_input = torch.cat((input, output_init)) # M=Mv+Mc
-        aa_target = torch.cat((input, target)) # M=Mv+Mc
-        return aa_input, aa_target
-
-    def __len__(self):
-        return len(self.dataset)
 
 
 def autoassociative_loss(aa_output, aa_target, num_outputs=10, loss_fn=nn.MSELoss()):
@@ -78,20 +60,20 @@ def autoassociative_acc(aa_output, aa_target, num_outputs=10):
     return acc
 
 
-def train(net, train_loader, test_loader=None, epochs=10, print_every=100, device='cpu'):
+def train(net, train_loader, test_loader=None, epochs=10, print_every=100):
+    device = next(net.parameters()).device #assumes all model params on same device
     optimizer = torch.optim.Adam(net.parameters())
-
     logger = defaultdict(list)
+
     iteration = 0
     for epoch in range(1,epochs+1):
         for batch_num, (input, target) in enumerate(train_loader):
-            input, target = input.to(device), target.to(device)
-
             iteration += 1
 
+            input, target = input.to(device), target.to(device)
             output = net(input)
-            loss = autoassociative_loss(output, target)
 
+            loss = autoassociative_loss(output, target)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -118,58 +100,35 @@ def train(net, train_loader, test_loader=None, epochs=10, print_every=100, devic
                     logger['test_acc'].append(test_acc.item())
                     log_str += ' test_loss={:.3f} test_acc={:.2f}'.format(test_loss, test_acc)
                 print(log_str)
-    return logger
+    return dict(logger)
 
 
 #%%
-if __name__ == '__main__':
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('device =', device)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print('device =', device)
 
-    #get dataset
-    to_vec = transforms.Compose([transforms.ToTensor(),
-                                 transforms.Lambda(lambda x: x.view(-1,1))])
-    to_onehot = transforms.Lambda(lambda y: torch.zeros(10,1)
-                                  .scatter_(0, torch.tensor([[y]]), value=1))
-    train_data = AutoassociativeDataset(
-                    datasets.MNIST(root='./data/', download=True,
-                                   transform=to_vec, target_transform=to_onehot)
-                    )
-    test_data = AutoassociativeDataset(
-                    datasets.MNIST(root='./data/', train=False, download=True,
-                                   transform=to_vec, target_transform=to_onehot)
-                    )
+#get dataset
+train_data, test_data = data.get_aa_mnist_classification_data(include_test=True)
 
-    # train_data.dataset.data.to(device)
-    # test_data.dataset.data.to(device)
+#define network
+input_size = train_data[0][0].numel()
+hidden_size = 100
+net = ModernHopfield(input_size, hidden_size, num_steps=1)
 
-    #define network
-    input_size = train_data[0][0].numel()
-    hidden_size = 1000
-    net = ModernHopfield(input_size, hidden_size, num_steps=1)
+#train network
+batch_size = 500
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=len(test_data))
 
-    #train network
-    batch_size = 100
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
-                                               shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=len(test_data))
+with Timer(device):
+    net.to(device)
+    logger = train(net, train_loader, test_loader, epochs=30)
 
-    with Timer(device):
-        net.to(device)
-        logger = train(net, train_loader, test_loader, epochs=10, device=device)
+#%%plot
+plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
+              logger['test_loss'], logger['test_acc'], logger['iter'],
+              title='ModernHopfield (N={}), MNIST (B={})'.format(hidden_size, batch_size))
 
-    #%%plot
-    fig, ax = plt.subplots(2,1)
-    ax[0].plot(logger['iter'], logger['train_loss'], label='Train')
-    ax[0].plot(logger['iter'], logger['test_loss'], label='Test')
-    ax[0].set_ylabel('Loss (MSE)')
-    ax[0].set_title('ModernHopfield (N={}), MNIST (B={})'.format(hidden_size, batch_size))
-    ax[0].legend()
+plots.plot_weights_mnist(net.mem)
 
-    ax[1].plot(logger['iter'], logger['train_acc'])
-    ax[1].plot(logger['iter'], logger['test_acc'])
-    ax[1].set_xlabel('Iterations')
-    ax[1].set_ylabel('Accuracy')
-
-    #TODO: plot weights (reshape to MNIST shape)
-    #TODO: get to 98%
+#TODO: get to 98%
