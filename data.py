@@ -27,9 +27,11 @@ class AutoassociativeDataset(Dataset):
 
 
 
-def get_aa_mnist_classification_data(include_test=False):
-    to_vec = transforms.Compose([transforms.ToTensor(),
-                             transforms.Lambda(lambda x: x.view(-1,1))])
+def get_aa_mnist_classification_data(include_test=False, balanced=True):
+    data_transforms_list = [transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1,1))]
+    if balanced: #put data in range [+1,-1] instead of [0,1]
+        data_transforms_list.append(transforms.Lambda(lambda x: 2*x-1 ))
+    to_vec = transforms.Compose(data_transforms_list)
     to_onehot = transforms.Lambda(lambda y: torch.zeros(10,1)
                                   .scatter_(0, torch.tensor([[y]]), value=1))
     train_data = AutoassociativeDataset(
