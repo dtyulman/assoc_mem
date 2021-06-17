@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import torch
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
@@ -26,23 +28,42 @@ class AutoassociativeDataset(Dataset):
         return len(self.dataset)
 
 
-
-def get_aa_mnist_classification_data(include_test=False, balanced=True):
+def get_aa_mnist_classification_data(include_test=False, balanced=False):
     data_transforms_list = [transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1,1))]
     if balanced: #put data in range [+1,-1] instead of [0,1]
         data_transforms_list.append(transforms.Lambda(lambda x: 2*x-1 ))
     to_vec = transforms.Compose(data_transforms_list)
     to_onehot = transforms.Lambda(lambda y: torch.zeros(10,1)
                                   .scatter_(0, torch.tensor([[y]]), value=1))
-    train_data = AutoassociativeDataset(
-                    datasets.MNIST(root='./data/', download=True,
-                                   transform=to_vec, target_transform=to_onehot)
-                    )
-    test_data = AutoassociativeDataset(
-                    datasets.MNIST(root='./data/', train=False, download=True,
-                                   transform=to_vec, target_transform=to_onehot)
-                    )
 
-    if test_data:
+    train_data = datasets.MNIST(root='./data/', download=True, transform=to_vec,
+                                target_transform=to_onehot)
+    train_data = AutoassociativeDataset(train_data)
+    if include_test:
+        test_data = datasets.MNIST(root='./data/', train=False, download=True, transform=to_vec,
+                                   target_transform=to_onehot)
+        test_data = AutoassociativeDataset(test_data)
         return train_data, test_data
     return train_data
+
+
+def filter_classes(dataset, select_classes='all', n_per_class=None, sort_by_class=True):
+    if select_classes == 'all':
+        select_classes = dataset.class_to_idx.values()
+
+    selected_idx_per_class = []
+    for c in select_classes:
+        idx = (dataset.targets == c).nonzero().squeeze() #get indices corresponding to this class
+        if n_per_class is not None:
+            idx = idx[:n_per_class] #only take the first n_per_class items of this class
+        selected_idx_per_class.append(idx)
+    selected_idx = torch.cat((selected_idx_per_class))
+
+    if not sort_by_class:
+        #revert sorting to original order in dataset
+        selected_idx = selected_idx.sort()[0]
+
+    filtered_dataset = deepcopy(dataset)
+    filtered_dataset.data = dataset.data[selected_idx]
+    filtered_dataset.targets = dataset.targets[selected_idx]
+    return filtered_dataset
