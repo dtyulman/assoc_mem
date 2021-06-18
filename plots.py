@@ -58,7 +58,7 @@ def plot_weights_mnist(W, max_n_rows=1024, plot_class_pixels=True, ax=None):
     return ax
 
 
-def plot_hidden_max(state_debug_history, n_per_class, ax=None):
+def plot_hidden_max_argmax(state_debug_history, n_per_class, ax=None):
     if ax is None:
         fig, ax = plt.subplots(2,1)
 
@@ -83,7 +83,7 @@ def plot_hidden_max(state_debug_history, n_per_class, ax=None):
         a.set_xticklabels(list(range(10))+[None])
 
 
-def plot_state_update_magnitude(state_debug_history, n_per_class, max_train_steps=None, ax=None):
+def plot_state_update_magnitude(state_debug_history, n_per_class, num_steps_train=None, ax=None):
     state_trajectory = np.array([state_debug['state'].detach().numpy()
                                  for state_debug in state_debug_history]).squeeze() #[T,B,M,1]
     update_magnitude = np.linalg.norm(np.diff(state_trajectory, axis=0), axis=2)
@@ -102,12 +102,12 @@ def plot_state_update_magnitude(state_debug_history, n_per_class, max_train_step
     ax.set_xlabel('Time steps')
     ax.set_ylabel('Update magnitude $|| \Delta \\vec{v}_t ||$')
 
-    if max_train_steps:
-        ax.axvline(max_train_steps, color='k', lw='0.5')
+    if num_steps_train:
+        ax.axvline(num_steps_train, color='k', lw='0.5')
 
 
 ###############
-### HELPERS ###
+### Helpers ###
 ###############
 def rows_to_images(M, vpix=-1, hpix=-1, drop_last=0):
     """Convert a matrix <M> with R rows to a list of R <vpix>-by-<hpix> matrices (e.g. images).
