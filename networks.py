@@ -6,7 +6,7 @@ from torch import nn
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
     def __init__(self, input_size, hidden_size, beta=None, tau=None,
-                 num_steps=None, dt=1, fp_threshold=0.001):
+                 num_steps=None, dt=1, fp_thres=0.001):
         super().__init__()
         self.input_size = input_size # M
         self.hidden_size = hidden_size # N
@@ -20,7 +20,7 @@ class ModernHopfield(nn.Module):
         assert dt<=1, 'Step size dt should be <=1'
         self.dt = dt
         self.num_steps = int(1/self.dt) if num_steps is None else num_steps
-        self.fp_threshold = fp_threshold
+        self.fp_thres = fp_thres
 
 
     def forward(self, input, debug=False):
@@ -29,7 +29,7 @@ class ModernHopfield(nn.Module):
             state_debug_history = []
         update_magnitude = float('inf')
         step = 0
-        while update_magnitude > self.fp_threshold and step < self.num_steps:
+        while update_magnitude > self.fp_thres and step < self.num_steps:
             prev_state = state
             state = self.update_state(prev_state, debug=debug) #[B,M,1]
             if debug: #state is actually state_debug
@@ -38,6 +38,9 @@ class ModernHopfield(nn.Module):
             with torch.no_grad():
                 update_magnitude = (prev_state-state).norm()
             step += 1
+            if step >= self.num_steps:
+                print('Warning: reached max num steps without convergence: '
+                      f'(update={update_magnitude}, fp_thres={self.fp_thres})')
         if debug:
             return state_debug_history
         return state

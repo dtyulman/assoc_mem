@@ -28,12 +28,18 @@ class AutoassociativeDataset(Dataset):
         return len(self.dataset)
 
 
-def get_aa_mnist_classification_data(include_test=False, balanced=False, downsample=None):
-    data_transforms_list = [transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1,1))]
+def get_aa_mnist_classification_data(include_test=False, balanced=False, crop=False, downsample=False):
+    data_transforms_list = [transforms.ToTensor()]
     if balanced: #put data in range [+1,-1] instead of [0,1]
         data_transforms_list.append(transforms.Lambda(lambda x: 2*x-1 ))
+    if crop: #remove <crop> pixels from top,bottom,left,right
+        #note output of ToTensor is CxHxW so keep first dimension
+        data_transforms_list.append(transforms.Lambda(lambda x: x[:,crop:-crop,crop:-crop]) )
     if downsample:
-        data_transforms_list.append(transforms.Lambda(lambda x: x[::downsample] ))
+        data_transforms_list.append(transforms.Lambda(lambda x: x[:,::downsample,::downsample] ))
+    #would like to do .view(-1,1) to avoid copy but throws error if cropping
+    data_transforms_list.append( transforms.Lambda(lambda x: x.reshape(-1,1)) )
+
 
     to_vec = transforms.Compose(data_transforms_list)
     to_onehot = transforms.Lambda(lambda y: torch.zeros(10,1)

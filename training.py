@@ -1,13 +1,20 @@
 from collections import defaultdict
+import warnings
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
+
+class LoopWarning(RuntimeWarning):
+    pass
+
 ########################
 # Fixed point training #
 ########################
 def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, logger=None, print_every=100):
+    warnings.simplefilter('once', LoopWarning)
+
     device = next(net.parameters()).device #assumes all model params on same device
     num_classes = 10 #assume MNIST
 
@@ -36,6 +43,11 @@ def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, 
                 error_class = (output_class - target_class).unsqueeze(1).unsqueeze(1) #[B,Mc,1]-->[B,1,1,Mc,1]
                 dLdW = (error_class*dvdW_class).squeeze().sum(dim=0).sum(dim=-1) #[B,(N,M),Mc,1]-->[N,M]
                 net.mem -= lr*dLdW
+                del dvdW, output_class, target_class, dvdW_class, error_class, dLdW
+
+                #in principle should not need this since it only releases memory to *outside*
+                #programs but in practice helps with OOM (perhaps due to PyTorch mem leaks?)
+                torch.cuda.empty_cache()
 
                 if iteration % print_every == 0:
                     acc = autoassociative_acc(output, target)
@@ -74,34 +86,46 @@ def compute_dvdW(v, W, beta):
     g = v #[B,M,1]
     h = torch.matmul(W, g) #[B,N,1]
     f = F.softmax(beta*h, dim=1) #[B,N,1]
-
     del h, v #free up memory
-    torch.cuda.empty_cache()
 
     # for a single synaptic weight from v_i to h_u: A*dvdW_{ui} = b_{ui}, [M,M]@[M,1]-->[M,1]
     # for all the synaptic weights: A*dvdW = b, shape [M,M]@[(N,M),M,1]-->[(N,M),M,1]
     # batched: A*dvdW = b, [B,M,M]@[B,(N,M),M,1]-->[B,(N,M),M,1]
-    ffT = torch.bmm(f, f.transpose(1,2)) #[B,N,1],[B,1,N]-->[B,N,N]
-    Df = f.squeeze().diag_embed() #[B,N,1]-->[B,N,N]
-    A = torch.eye(M, device=dev) + beta * W.t() @ (Df-ffT) @ W #[M,M] + 1*[M,N]@[B,N,N]@[N,M]-->[B,M,M]
 
-    del ffT, Df #free up memory
-    torch.cuda.empty_cache()
-
+    #Want to do this, but it uses too much memory:
+    # ffT = torch.bmm(f, f.transpose(1,2)) #[B,N,1],[B,1,N]-->[B,N,N]
+    # Df = f.squeeze().diag_embed() #[B,N,1]-->[B,N,N]
+    # A = torch.eye(M, device=dev) + beta * W.t() @ (Df-ffT) @ W #[M,M] + 1*[M,N]@[B,N,N]@[N,M]-->[B,M,M]
+    #
     # DDf = f.expand(-1,-1,M).diag_embed().unsqueeze(-1) #[B,N,1]-->[B,N,M]-->[B,(N,M),M]-->[B,(N,M),M,1]
     # fgT = torch.bmm(f, g.transpose(1,2)).unsqueeze(-1).unsqueeze(-1) #[B,N,1]@[B,1,M]-->[B,(N,M)]-->[B,(N,M),1,1]
     # WTf = (W.t() @ f).unsqueeze(1).unsqueeze(1) #[M,N]@[B,N,1]-->[B,M,1]-->[B,(1,1),M,1]
     # WT_ = W.tile(1,M).view(1,N,M,M,1) #[N,M]-->[N,M*M]-->[1,(N,M),M,1]
     # b = DDf + beta*fgT*(WT_-WTf) #[B,(N,M),M,1] via broadcasting
 
-    #in-place version uses less memory
-    b = W.tile(1,M).view(1,N,M,M,1)
-    b -= (W.t() @ f).unsqueeze(1).unsqueeze(1)
-    b *= beta*torch.bmm(f, g.transpose(1,2)).unsqueeze(-1).unsqueeze(-1)
-    b += f.expand(-1,-1,M).diag_embed().unsqueeze(-1)
+    A = f.squeeze().diag_embed() #Df
+    A = A - torch.bmm(f, f.transpose(1,2)) #Df-ffT
+    A = beta*W.t() @ A #beta*W.t() @ (Df-ffT) #note minor numerical difference swapping this and next line
+    A = A @ W #beta*W.t() @ (Df-ffT) @ W
+    A = A + torch.eye(M, device=dev) #eye + beta*W.t()@(Df-ffT)@W
 
+    b = W.tile(1,M).view(1,N,M,M,1) #WT_
+    b = b - (W.t()@f).unsqueeze(1).unsqueeze(1) #WT_-WTf
+    b = b * beta*torch.bmm(f, g.transpose(1,2)).unsqueeze(-1).unsqueeze(-1) #beta*fgT*(WT_-WTf)
+    b = b + f.expand(-1,-1,M).diag_embed().unsqueeze(-1) #DDf + beta*fgT*(WT_-WTf)
 
-    dvdW = torch.linalg.solve(A.unsqueeze(1).unsqueeze(1), b) #[B,1,1,M,M],[B,(N,M),M,1]-->[B,(N,M),M,1]
+    #Want to do this, but it's slower (because inverts A for each b_{ui}?)
+    # dvdW = torch.linalg.solve(A.unsqueeze(1).unsqueeze(1), b)
+    Ainv = (torch.linalg.inv(A)).unsqueeze(1).unsqueeze(1) #[B,1,1,M,M]
+    del A
+
+    try:
+        dvdW = Ainv @ b #[B,1,1,M,M],[B,(N,M),M,1]-->[B,(N,M),M,1]
+    except RuntimeError as e: #out of memory
+        warnings.warn(f'Cannot batch multiply: "{e.args[0]}." Looping over batch...', LoopWarning)
+        dvdW = torch.empty_like(b)
+        for batch_idx, (Ainv_, b_) in enumerate(zip(Ainv, b)):
+            dvdW[batch_idx] = Ainv_ @ b_
 
     return dvdW
 

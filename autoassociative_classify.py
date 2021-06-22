@@ -23,25 +23,31 @@ print('device =', device)
 
 #get dataset
 train_data, test_data = data.get_aa_mnist_classification_data(include_test=True,
-                                                              downsample=5)
+                                                              crop=2, downsample=2)
+
+train_data.dataset.data = train_data.dataset.data[:1000]
+train_data.dataset.targets = train_data.dataset.targets[:1000]
 
 #define network
 input_size = train_data[0][0].numel()
 hidden_size = 50
-net = ModernHopfield(input_size, hidden_size, dt=0.05, num_steps=10/.05, tau=1)
+net = ModernHopfield(input_size, hidden_size, dt=0.05, num_steps=20/.05, tau=1, beta=5)
 logger = None
 
 #%%train network
-batch_size = 1
+batch_size = 100
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
-test_loader = torch.utils.data.DataLoader(test_data, batch_size=100)
+# test_loader = torch.utils.data.DataLoader(test_data, batch_size=100)
+test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
+
 with Timer(device):
     net.to(device)
-    # logger = SGD_train(net, train_loader, test_loader, logger=logger, epochs=300)
-    logger = fixed_point_train(net, train_loader, test_loader, logger=logger, epochs=300)
+    logger = SGD_train(net, train_loader, test_loader, logger=logger, epochs=100, print_every=10)
+    # logger = fixed_point_train(net, train_loader, test_loader, logger=logger, epochs=100, print_every=10)
 
 
 #%% plot
+net.to('cpu')
 plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
               logger['test_loss'], logger['test_acc'], logger['iter'],
               title='ModernHopfield (N={}), MNIST (B={})'.format(hidden_size, batch_size))
@@ -55,7 +61,7 @@ state_debug_history = net(debug_input, debug=True)
 plots.plot_hidden_max_argmax(state_debug_history, n_per_class)
 
 #%%
-n_per_class = 2
+n_per_class = 1
 debug_data = data.AutoassociativeDataset(data.filter_classes(test_data.dataset,n_per_class=n_per_class))
 debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
 num_steps_train = net.num_steps
