@@ -5,16 +5,16 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
-class LoopWarning(RuntimeWarning):
+class NoBatchWarning(RuntimeWarning):
     pass
+warnings.simplefilter('once', NoBatchWarning)
+
 
 ########################
 # Fixed point training #
 ########################
 def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, logger=None, print_every=100):
-    warnings.simplefilter('once', LoopWarning)
-
+    print('Training: fixed point optimization')
     device = next(net.parameters()).device #assumes all model params on same device
     num_classes = 10 #assume MNIST
 
@@ -32,18 +32,27 @@ def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, 
                 input, target = input.to(device), target.to(device)
                 output = net(input) #[B,M,1]
 
-                dvdW = compute_dvdW(output, net.mem, net.beta) #[B,(N,M),M,1]
+                # dvdW = compute_dvdW(output, net.W, net.beta) #[B,(N,M),M,1]
 
-                #only consider the neurons reporting the class
-                output_class = output[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
-                target_class = target[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
-                dvdW_class = dvdW[:,:,:, -num_classes:, :] #[B,(N,M),M,1] --> #[B,(N,M),Mc,1]
+                # #only consider the neurons reporting the class
+                # output_class = output[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
+                # target_class = target[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
+                # dvdW_class = dvdW[:,:,:, -num_classes:, :] #[B,(N,M),M,1] --> #[B,(N,M),Mc,1]
 
-                #assume MSE loss
-                error_class = (output_class - target_class).unsqueeze(1).unsqueeze(1) #[B,Mc,1]-->[B,1,1,Mc,1]
-                dLdW = (error_class*dvdW_class).squeeze().sum(dim=0).sum(dim=-1) #[B,(N,M),Mc,1]-->[N,M]
-                net.mem -= lr*dLdW
-                del dvdW, output_class, target_class, dvdW_class, error_class, dLdW
+                # #assume MSE loss
+                # error_class = (output_class - target_class).unsqueeze(1).unsqueeze(1) #[B,Mc,1]-->[B,1,1,Mc,1]
+                # dLdW1 = (error_class*dvdW_class).squeeze().sum(dim=0).sum(dim=-1) #[B,(N,M),Mc,1]-->[N,M]
+                # del dvdW, output_class, target_class, dvdW_class, error_class, dLdW
+
+                dLdW = compute_dLdW(output, target, net.W, net.beta, Mc=num_classes)
+
+                # dLdW_nb = compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0),
+                #                               net.W, net.beta)
+                # assert (dLdW-dLdW_nb).abs().mean() < 1e-10
+
+                net.W -= lr*dLdW
+                del dLdW
+
 
                 #in principle should not need this since it only releases memory to *outside*
                 #programs but in practice helps with OOM (perhaps due to PyTorch mem leaks?)
@@ -56,7 +65,7 @@ def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, 
                     logger['train_loss'].append(loss.item())
                     logger['train_acc'].append(acc.item())
 
-                    log_str = 'iter={:3d}({:5d}) train_loss={:.3f} train_acc={:.2f}' \
+                    log_str = 'iter={:3d}({:5d}) train_loss={:.4f} train_acc={:.3f}' \
                                  .format(epoch, iteration, loss, acc)
 
                     if test_loader is not None:
@@ -70,9 +79,59 @@ def fixed_point_train(net, train_loader, test_loader=None, lr=0.001, epochs=10, 
 
                         logger['test_loss'].append(test_loss.item())
                         logger['test_acc'].append(test_acc.item())
-                        log_str += ' test_loss={:.3f} test_acc={:.2f}'.format(test_loss, test_acc)
+                        log_str += ' test_loss={:.4f} test_acc={:.3f}'.format(test_loss, test_acc)
                     print(log_str)
     return dict(logger)
+
+
+def compute_dLdW_nobatch(v, t, KS, beta, Mc=10):
+    assert(len(v.shape)==2), 'output v cannot be batched'
+    assert(len(t.shape)==2), 'target t cannot be batched'
+    N,M = KS.shape
+    f = F.softmax(beta * KS @ v, dim=0)
+
+    FF = torch.diag(f[:,0]) - f @ f.T
+    A = torch.eye(M, device=KS.device) - beta * KS.T @ FF @ KS
+    A_inv = torch.linalg.inv(A)
+    a = A_inv[:,-Mc:] @ (v-t)[-Mc:]
+    dKS1 = f @ a.T
+    dKS2 = beta * FF @ KS @ a @ v.T
+    return dKS1+dKS2
+
+
+def compute_dLdW(v, t, W, beta, Mc=None):
+    """
+    Assumes:
+        Modern Hopfield dynamics, tau*dv/dt = -v + W*softmax(W^T*v)
+        v is a fixed point, dv/dt = 0, i.e. v = W*softmax(W^T*v)
+        MSE loss, L = 1/2 sum_i (v_i - t_i)^2
+    """
+    N,M = W.shape
+    g = v #[B,M,1]
+    h = W@g #[N,M]@[B,M,1] --> [B,N,1]
+    f = F.softmax(beta*h, dim=1) #[B,N,1]
+
+    e = v-t  #error [B,M,1]
+    del h, v, t #free up memory
+
+    bFFW = beta*(f.squeeze().diag_embed() - f @ f.transpose(1,2)) @ W #([B,N,N]-[B,N,1]@[B,1,N])@[N,M] --> [B,N,M]
+    A = torch.eye(M, device=W.device) - W.t() @ bFFW #[M,M]+[M,N]@[B,N,M] --> [B,M,M]
+
+    if Mc: #only compute loss over the last Mc units
+        Ainv = torch.linalg.inv(A) #[B,M,M]
+        a = Ainv[:,-Mc:].transpose(1,2) @ e[:,-Mc:] #[B,M,Mc]@[B,Mc,1]--> [B,M,1]
+        del Ainv
+    else:
+        #a = A^(-1)^T * e <=> a = A^(-1) * e  b/c A and A^(-1) symmetric for g(x)=x
+        a = torch.linalg.solve(A.transpose(1,2), e) #[B,M,M],[B,M,1] --> [B,M,1]
+    del A, e
+
+    # dLdW = f @ a.transpose(1,2) + bFFW @ a @ g.transpose(1,2) #[B,N,1]@[B,1,Mc]+[B,N,M]@[B,M,1]@[B,1,M] --> [B,N,M]
+    dLdW = bFFW @ a @ g.transpose(1,2);
+    del bFFW, g
+    dLdW = dLdW + f @ a.transpose(1,2)
+    del f, a
+    return dLdW.mean(dim=0)
 
 
 def compute_dvdW(v, W, beta):
@@ -122,21 +181,12 @@ def compute_dvdW(v, W, beta):
     try:
         dvdW = Ainv @ b #[B,1,1,M,M],[B,(N,M),M,1]-->[B,(N,M),M,1]
     except RuntimeError as e: #out of memory
-        warnings.warn(f'Cannot batch multiply: "{e.args[0]}." Looping over batch...', LoopWarning)
+        warnings.warn(f'Cannot batch multiply: "{e.args[0]}." Looping over batch...', NoBatchWarning)
         dvdW = torch.empty_like(b)
         for batch_idx, (Ainv_, b_) in enumerate(zip(Ainv, b)):
             dvdW[batch_idx] = Ainv_ @ b_
 
     return dvdW
-
-
-def get_fixed_point(net, v0, mode='iterate'):
-    if mode == 'iterate':
-        return net(v0)
-    elif mode == 'scipy':
-        #https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.fixed_point.html
-        #may be faster and/or more robust
-        raise NotImplementedError
 
 
 ################
@@ -176,7 +226,9 @@ def autoassociative_acc(aa_output, aa_target, num_outputs=10):
     return acc
 
 
-def SGD_train(net, train_loader, test_loader=None, epochs=10, logger=None, print_every=100):
+def sgd_train(net, train_loader, test_loader=None, epochs=10, logger=None, print_every=100):
+    print('Training: BPTT')
+
     device = next(net.parameters()).device #assumes all model params on same device
     optimizer = torch.optim.Adam(net.parameters())
     if logger is None:
