@@ -62,7 +62,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class, ax=None):
     if ax is None:
         fig, ax = plt.subplots(2,1)
 
-    h = state_debug_history[-1]['h'].detach()
+    h = state_debug_history[-1]['f'].detach()
     assert len(h.shape)==3, 'Hidden activity must have three dimensions: [B,N,1]'
     max_h_value, max_h_idx = torch.max(h, dim=1)
 
@@ -70,7 +70,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class, ax=None):
     ax[0].set_ylabel('Most active unit')
 
     ax[1].plot(max_h_value, ls='', marker='.')
-    ax[1].set_ylabel('Activity')
+    ax[1].set_ylabel('Activity $(h)$')
     ax[1].set_xlabel(f'Digit ({n_per_class} samples each)')
 
     size_data = h.shape[0] #B
@@ -83,32 +83,74 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class, ax=None):
         a.set_xticklabels(list(range(10))+[None])
 
 
-def plot_state_update_magnitude(state_debug_history, n_per_class, num_steps_train=None, ax=None):
-    state_trajectory = np.array([state_debug['state'].detach().numpy()
-                                 for state_debug in state_debug_history]).squeeze() #[T,B,M,1]
-    update_magnitude = np.linalg.norm(np.diff(state_trajectory, axis=0), axis=2)
-    steps = np.array(range(1, len(state_trajectory)))
+def _plot_debug_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, ax=None):
+    """Plots the evolution of <var> as dynamics progresses over time <steps>"""
+    size_data = var.shape[1] #B
+    n_classes = size_data//n_per_class
 
     if ax is None:
         fig, ax = plt.subplots()
-        size_data = state_trajectory.shape[1] #B
-        n_classes = size_data//n_per_class
         cc = cycler(color=plt.cm.jet(np.linspace(0,1,n_classes)))
         ax.set_prop_cycle(cc)
 
+    if steps is None:
+        steps = np.array(range(len(var)))
+
     for i in range(n_per_class):
-        ax.plot(steps, update_magnitude[:,i::n_per_class])
-    ax.legend(list(range(10)))
+        ax.plot(steps, var[:,i::n_per_class])
+    ax.legend(list(range(n_classes)))
     ax.set_xlabel('Time steps')
-    ax.set_ylabel('Update magnitude $|| \Delta \\vec{v}_t ||$')
 
     if num_steps_train:
         ax.axvline(num_steps_train, color='k', lw='0.5')
+    return ax
+
+
+def plot_state_update_magnitude_dynamics(state_debug_history,
+                                         n_per_class=1, num_steps_train=None, ax=None):
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'state').numpy().squeeze(-1)
+    update_magnitude = np.linalg.norm(np.diff(state_trajectory, axis=0), axis=2)
+    steps = np.array(range(1, len(state_trajectory)))
+
+    ax = _plot_debug_dynamics(update_magnitude, steps,
+                              n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
+    ax.set_ylabel('Update magnitude $|| \Delta \\vec{v}_t ||$')
+    return ax
+
+
+def plot_energy_dynamics(state_debug_history, net,
+                         n_per_class=1, num_steps_train=None, ax=None):
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'state')
+    energy = net.energy(state_trajectory).squeeze(-1)
+
+    ax = _plot_debug_dynamics(energy,
+                              n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
+    ax.set_ylabel('Energy')
+    return ax
+
+
+def plot_max_hidden_dynamics(state_debug_history,
+                             n_per_class=1, num_steps_train=None, ax=None):
+    f_trajectory = get_trajectory_by_key(state_debug_history, 'f').squeeze(-1) #[T,B,N]
+    N = f_trajectory.shape[-1]
+    max_f_value, max_f_idx = torch.max(f_trajectory, dim=-1) #both [T,B]
+
+    ax = _plot_debug_dynamics(max_f_value,
+                              n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
+    ax.set_ylabel('max($\\vec{f}$)')
+    ax.axhline(1./N, color='k', lw='0.5', ls='--')
+    return ax
 
 
 ###############
 ### Helpers ###
 ###############
+def get_trajectory_by_key(state_debug_history, key):
+    trajectory = torch.stack([state_debug[key].detach()
+                            for state_debug in state_debug_history])
+    return trajectory #[T,B,*] e.g. [T,B,M,1] or [T,B,N,1]
+
+
 def rows_to_images(M, vpix=-1, hpix=-1, drop_last=0):
     """Convert a matrix <M> with R rows to a list of R <vpix>-by-<hpix> matrices (e.g. images).
     Optionally discard the <drop_last> entries of each row before reshaping it."""
