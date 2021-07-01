@@ -1,3 +1,4 @@
+import itertools
 from collections.abc import Mapping
 from copy import deepcopy
 
@@ -23,7 +24,21 @@ class PersistentDict(Mapping):
 def vary_config(baseconfig, mode='combinatorial', **kwargs):
     """With baseconfig as the default, return a list of configs with entries given by kwargs.keys()
     varied according to the corresponding lists in kwargs.values(). Baseconfig is not included"""
-    pass
+    configs = []
+    assert all([key in baseconfig for key in kwargs])
+    if mode == 'combinatorial':
+        for params in itertools.product(*kwargs.values()):
+            config = deepcopy(baseconfig)
+            for key, param in zip(kwargs.keys(), params):
+                config[key] = param
+            configs.append(config)
+    elif mode == 'sequential':
+        len_params_list = len(list(kwargs.values)[0])
+        assert all([len(params)==len_params_list for params in kwargs.values()])
+        raise NotImplementedError()
+    else:
+        raise ValueError(f'Invalid mode: {mode}')
+    return configs
 
 
 ###################
