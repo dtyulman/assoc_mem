@@ -9,7 +9,7 @@ from torch import nn
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
     def __init__(self, input_size, hidden_size, beta=None, tau=None,
-                 num_steps=None, dt=1, fp_thres=0.001, fp_mode='iter'):
+                 input_mode='init', num_steps=None, dt=1, fp_thres=0.001, fp_mode='iter'):
         super().__init__()
         self.input_size = input_size # M
         self.hidden_size = hidden_size # N
@@ -24,13 +24,23 @@ class ModernHopfield(nn.Module):
         self.dt = dt
         self.num_steps = int(1/self.dt) if num_steps is None else int(num_steps)
 
-        assert fp_mode in ['iter', 'del2'], f"Invalid fp mode: '{fp_mode}' "
+        assert fp_mode in ['iter', 'del2'], f"Invalid fp mode: '{fp_mode}'"
         self.fp_mode = fp_mode
         self.fp_thres = fp_thres
 
+        assert input_mode in ['init', 'cont', 'init+cont'], f"Invalid input mode: '{input_mode}' "#, 'clamp']
+        self.input_mode = input_mode
 
-    def forward(self, init_state, input=0., debug=False):
-        state = init_state #[B,M,1]
+
+    def forward(self, input, debug=False):
+        if 'init' in self.input_mode:
+            state = input #[B,M,1]
+        else:
+            state = torch.zeros_like(input)
+
+        if 'cont' not in self.input_mode:
+            input = 0
+
         if debug:
             state_debug_history = []
         update_magnitude = float('inf')
