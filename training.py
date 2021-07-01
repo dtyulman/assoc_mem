@@ -6,14 +6,16 @@ from torch import nn
 import torch.nn.functional as F
 
 
-class Train():
-    def __init__(self, net, train_loader, test_loader=None, logger=None, print_every=100):
+class AssociativeTrain():
+    def __init__(self, net, train_loader, test_loader=None, only_class_loss=True, logger=None, print_every=100):
         self.name = None
         self.net = net
-        self.device = next(net.parameters()).device  # assumes all model params on same device
+        self.device = next(net.parameters()).device  # assume all model params on same device
 
         self.train_loader = train_loader
         self.test_loader = test_loader
+        self.n_class_units = train_loader.dataset.target_size #Mc
+        self.only_class_loss = only_class_loss
 
         self.print_every = print_every
         if logger is None:
@@ -28,6 +30,23 @@ class Train():
         raise NotImplementedError
 
 
+    def loss_fn(self, output, target):
+        if self.only_class_loss:
+            output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+            target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+        loss = F.mse_loss(output, target, reduction='mean')
+        return loss
+
+
+    def acc_fn(self, output, target):
+        output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+        target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+        output_class = torch.argmax(output, dim=1)
+        target_class = torch.argmax(target, dim=1)
+        acc = (output_class == target_class).float().mean()
+        return acc
+
+
     def __call__(self, epochs=10):
         print(f'Training: {self.name}')
         for epoch in range(1, epochs+1):
@@ -40,8 +59,8 @@ class Train():
                 self._update_parameters(output, target)
 
                 if self.iteration % self.print_every == 0:
-                    loss = autoassociative_loss(output, target) #TODO this is getting computed twice in SGD
-                    acc = autoassociative_acc(output, target)
+                    loss = self.loss_fn(output, target) #TODO this is getting computed twice in SGD
+                    acc = self.acc_fn(output, target)
                     self.logger['iter'].append(self.iteration)
                     self.logger['train_loss'].append(loss.item())
                     self.logger['train_acc'].append(acc.item())
@@ -55,8 +74,8 @@ class Train():
                             test_input, test_target = test_input.to(self.device), test_target.to(self.device)
 
                             test_output = self.net(test_input)
-                            test_loss = autoassociative_loss(test_output, test_target)
-                            test_acc = autoassociative_acc(test_output, test_target)
+                            test_loss = self.loss_fn(test_output, test_target)
+                            test_acc = self.acc_fn(test_output, test_target)
 
                         self.logger['test_loss'].append(test_loss.item())
                         self.logger['test_acc'].append(test_acc.item())
@@ -66,31 +85,26 @@ class Train():
 
 
 
-class SGDTrain(Train):
-    def __init__(self, net, train_loader, test_loader=None, logger=None, print_every=100):
-        super().__init__(net, train_loader, test_loader=test_loader, logger=logger, print_every=print_every)
+class SGDTrain(AssociativeTrain):
+    def __init__(self, net, train_loader, test_loader=None, **kwargs):
+        super().__init__(net, train_loader, **kwargs)
         self.name = 'SGD'
         self.optimizer = torch.optim.Adam(net.parameters())
 
 
     def _update_parameters(self, output, target):
-        loss = autoassociative_loss(output, target)
+        loss = self.loss_fn(output, target)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
 
 
-class FPTrain(Train):
-    def __init__(self, net, train_loader, test_loader=None, n_class_units=10, lr=0.1, logger=None, print_every=100):
-        super().__init__(net, train_loader, test_loader=test_loader, logger=logger, print_every=print_every)
+class FPTrain(AssociativeTrain):
+    def __init__(self, net, train_loader, test_loader=None, lr=0.1, **kwargs):
+        super().__init__(net, train_loader, **kwargs)
         self.name = 'FPT'
         self.lr = lr
-
-        #only compute loss over last Mc units of feature layer, which encode the class
-        #set to None to compute loss over entire feature layer
-        assert n_class_units is None or n_class_units > 0
-        self.n_class_units = n_class_units #Mc
 
         #parameters
         self.W = net.W
@@ -141,7 +155,7 @@ class FPTrain(Train):
         h = self.W@g  # [N,M]@[B,M,1] --> [B,N,1]
         f = F.softmax(self.beta*h, dim=1)  # [B,N,1]
 
-        if self.n_class_units:
+        if self.only_class_loss:
             e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
         else:
             e = v-t #[B,M,1]
@@ -151,7 +165,7 @@ class FPTrain(Train):
         bFFW = self.beta * (f.squeeze().diag_embed() - f @ f.transpose(1, 2)) @ self.W
         A = torch.eye(M, device=self.device) - self.W.t() @ bFFW  # [M,M]+[M,N]@[B,N,M] --> [B,M,M]
 
-        if self.n_class_units:  # only compute loss over the last Mc units, M=Md+Mc
+        if self.only_class_loss:  # only compute loss over the last Mc units, M=Md+Mc
             Ainv = torch.linalg.inv(A)  # [B,M,M]
             a = Ainv[:, -self.n_class_units:].transpose(1, 2) @ e #[B,M,Mc]@[B,Mc,1]--> [B,M,1]
             del Ainv
@@ -169,7 +183,7 @@ class FPTrain(Train):
         return dLdW.mean(dim=0)
 
 
-    def _dLdW_nobatch(self, v, t, Mc=10): #for debugging
+    def _dLdW_nobatch(self, v, t): #for debugging
         assert(len(v.shape) == 2), 'output v cannot be batched'
         assert(len(t.shape) == 2), 'target t cannot be batched'
         N,M = self.W.shape
@@ -178,15 +192,15 @@ class FPTrain(Train):
         bFFW = self.beta * (torch.diag(f[:, 0]) - f @ f.T) @ self.W
         A = torch.eye(M, device=self.device) - self.W.T @ bFFW
         A_inv = torch.linalg.inv(A)
-        a = A_inv[:, -Mc:] @ (v-t)[-Mc:]
+        a = A_inv[:, -self.n_class_units:] @ (v-t)[-self.n_class_units:]
         dLdW = f@ a.T + bFFW @ a @ v.T
         return dLdW
 
 
 
-######################
-# Loss/acc functions #
-######################
+#################
+# Miscellaneous #
+#################
 class MPELoss(nn.modules.loss._Loss):
     """Like MSELoss, but takes the P power instead of Square. If P odd, takes absolute value first
     i.e. L = 1/N sum |x-y|^P where N = x.numel()
@@ -205,26 +219,6 @@ class MPELoss(nn.modules.loss._Loss):
         return loss
 
 
-def autoassociative_loss(aa_output, aa_target, num_outputs=10, loss_fn=nn.MSELoss()):
-    output = aa_output[:, -num_outputs:, :]  # [B,M,1]->[B,Mc,1]
-    target = aa_target[:, -num_outputs:, :]  # [B,M,1]->[B,Mc,1]
-    loss = loss_fn(output, target)
-    return loss
-
-
-def autoassociative_acc(aa_output, aa_target, num_outputs=10):
-    output = aa_output[:, -num_outputs:, :]  # [B,M,1]->[B,Mc,1]
-    target = aa_target[:, -num_outputs:, :]  # [B,M,1]->[B,Mc,1]
-    output_class = torch.argmax(output, dim=1)
-    target_class = torch.argmax(target, dim=1)
-    acc = (output_class == target_class).float().mean()
-    return acc
-
-
-
-#################
-# Miscellaneous #
-#################
 class NoBatchWarning(RuntimeWarning):
     pass
 warnings.simplefilter('once', NoBatchWarning)

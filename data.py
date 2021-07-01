@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 
 
-class AutoassociativeDataset(Dataset):
+class AssociativeDataset(Dataset):
     """
     Convert a dataset with (input, target) pairs to work with autoassociative
     memory networks, returning (aa_input, aa_target) pairs, where
@@ -14,14 +14,14 @@ class AutoassociativeDataset(Dataset):
     def __init__(self, dataset, output_init_value=0):
         self.dataset = dataset
         self.output_init_value = output_init_value
-        self.input_size = dataset[0][0].numel() # Mv
+        self.input_size = dataset[0][0].numel() # Md
         self.target_size = dataset[0][1].numel() # Mc
 
     def __getitem__(self, idx):
         input, target = self.dataset[idx]
         output_init = torch.full_like(target, self.output_init_value)
-        aa_input = torch.cat((input, output_init)) # M=Mv+Mc
-        aa_target = torch.cat((input, target)) # M=Mv+Mc
+        aa_input = torch.cat((input, output_init)) # M=Md+Mc
+        aa_target = torch.cat((input, target)) # M=Md+Mc
         return aa_input, aa_target
 
     def __len__(self):
@@ -47,11 +47,11 @@ def get_aa_mnist_classification_data(include_test=False, balanced=False, crop=Fa
 
     train_data = datasets.MNIST(root='./data/', download=True, transform=to_vec,
                                 target_transform=to_onehot)
-    train_data = AutoassociativeDataset(train_data)
+    train_data = AssociativeDataset(train_data)
     if include_test:
         test_data = datasets.MNIST(root='./data/', train=False, download=True, transform=to_vec,
                                    target_transform=to_onehot)
-        test_data = AutoassociativeDataset(test_data)
+        test_data = AssociativeDataset(test_data)
         return train_data, test_data
     return train_data
 

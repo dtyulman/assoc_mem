@@ -50,53 +50,54 @@ else:
 
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
-trainer = SGDTrain(net, train_loader, test_loader, logger=logger, print_every=10)
-# trainer = FPTrain(net, train_loader, test_loader, logger=logger, print_every=10, n_class_units=10, lr=0.1)
+only_class_loss = False
+# trainer = SGDTrain(net, train_loader, test_loader, logger=logger, only_class_loss=only_class_loss, print_every=10)
+trainer = FPTrain(net, train_loader, test_loader, logger=logger, only_class_loss=only_class_loss, print_every=10, lr=0.1)
 
 with Timer(device):
-    logger = trainer(epochs=100)
+   logger = trainer(epochs=50)
 
 
 joblib.dump(logger, 'log.pkl')
 torch.save(net, 'net.pt')
 #%% plot
 
-net.to('cpu')
-plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
-              # logger['test_loss'], logger['test_acc'],
-              iters=logger['iter'],
-              title='ModernHopfield (N={}), toy, (B={})'.format(net.hidden_size, batch_size))
+# net.to('cpu')
+# plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
+#               # logger['test_loss'], logger['test_acc'],
+#               iters=logger['iter'],
+#               title='ModernHopfield (N={}), toy, (B={})'.format(net.hidden_size, batch_size))
 
-plots.plot_weights_mnist(net.W)
+# plots.plot_weights_mnist(net.W)
 
-# %%
-# n_per_class = 10
-# debug_data = data.AutoassociativeDataset(data.filter_classes(test_data.dataset,n_per_class=n_per_class))
+# # %%
+# # n_per_class = 10
+# # debug_data = data.AssociativeDataset(data.filter_classes(test_data.dataset,n_per_class=n_per_class))
+# # debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
+# # state_debug_history = net(debug_input, debug=True)
+# # plots.plot_hidden_max_argmax(state_debug_history, n_per_class)
+
+# #%%
+# import matplotlib.pyplot as plt
+# net.to('cpu')
+
+# n_per_class = 1
+# debug_data = data.AssociativeDataset(data.filter_classes(train_data.dataset,n_per_class=n_per_class))
 # debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
+# num_steps_train = net.num_steps
+# net.num_steps = int(100/net.dt)
+# net.fp_thres = 0
 # state_debug_history = net(debug_input, debug=True)
-# plots.plot_hidden_max_argmax(state_debug_history, n_per_class)
+# # plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train)
 
-#%%
-import matplotlib.pyplot as plt
-net.to('cpu')
+# # plots.plot_energy_dynamics(state_debug_history, net)
 
-n_per_class = 1
-debug_data = data.AutoassociativeDataset(data.filter_classes(train_data.dataset,n_per_class=n_per_class))
-debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
-num_steps_train = net.num_steps
-net.num_steps = int(100/net.dt)
-net.fp_thres = 0
-state_debug_history = net(debug_input, debug=True)
-# plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train)
-
-# plots.plot_energy_dynamics(state_debug_history, net)
-
-fig, ax = plt.subplots(2,1, sharex=True)
-plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[0])
-plots.plot_max_hidden_dynamics(state_debug_history, num_steps_train=num_steps_train, ax=ax[1])
-fig.suptitle('FPT')
-ax[0].set_xlabel('')
-ax[0].legend_.remove()
-w,h = fig.get_size_inches()
-fig.set_size_inches(w,1.5*h)
-fig.tight_layout()
+# fig, ax = plt.subplots(2,1, sharex=True)
+# plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[0])
+# plots.plot_max_hidden_dynamics(state_debug_history, num_steps_train=num_steps_train, ax=ax[1])
+# fig.suptitle('FPT')
+# ax[0].set_xlabel('')
+# ax[0].legend_.remove()
+# w,h = fig.get_size_inches()
+# fig.set_size_inches(w,1.5*h)
+# fig.tight_layout()
