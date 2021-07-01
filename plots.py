@@ -101,7 +101,7 @@ def _plot_debug_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, a
     ax.legend(list(range(n_classes)))
     ax.set_xlabel('Time steps')
 
-    if num_steps_train:
+    if num_steps_train and steps[-1]>num_steps_train:
         ax.axvline(num_steps_train, color='k', lw='0.5')
     return ax
 
@@ -126,6 +126,9 @@ def plot_energy_dynamics(state_debug_history, net,
     ax = _plot_debug_dynamics(energy,
                               n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
     ax.set_ylabel('Energy')
+
+    if (energy>0).any() and (energy<0).any():
+        ax.axhline(0, color='k', lw='0.5', ls='--')
     return ax
 
 
