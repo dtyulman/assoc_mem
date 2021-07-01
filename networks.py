@@ -23,27 +23,28 @@ class ModernHopfield(nn.Module):
         assert dt<=1, 'Step size dt should be <=1'
         self.dt = dt
         self.num_steps = int(1/self.dt) if num_steps is None else int(num_steps)
-        self.fp_thres = fp_thres
 
         assert fp_mode in ['iter', 'del2'], f"Invalid fp mode: '{fp_mode}' "
         self.fp_mode = fp_mode
+        self.fp_thres = fp_thres
 
 
-    def forward(self, input, debug=False):
-        state = input #[B,M,1]
+    def forward(self, init_state, input=0., debug=False):
+        state = init_state #[B,M,1]
         if debug:
             state_debug_history = []
         update_magnitude = float('inf')
         step = 0
         while update_magnitude > self.fp_thres and step < self.num_steps:
             prev_state = state
-            state = self.update_state(prev_state, debug=debug) #[B,M,1]
+            state = self.update_state(prev_state, input, debug=debug) #[B,M,1]
+            step += 1
+
             if debug: #state is actually state_debug
                 state_debug_history.append(state) #store it
                 state = state['state'] #extract the actual state from the dict
             with torch.no_grad():
                 update_magnitude = (prev_state-state).norm()
-            step += 1
             if step > self.num_steps and update_magnitude > self.fp_thres:
                 warnings.warn('Not converged: '
                       f'(update={update_magnitude}, fp_thres={self.fp_thres})')
@@ -82,16 +83,15 @@ class ModernHopfield(nn.Module):
     #     return p
 
 
-    def update_state(self, state, debug=False):
+    def update_state(self, v, I=0., debug=False):
         """
         Continuous: tau*dv/dt = -v + X*softmax(X^T*v)
         Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + X*softmax(X^T*v(t))]
         """
-        # h = self.W @ self._g(state) #[N,M],[B,M,1]->[B,N,1]
-        h = self.W @ state #since g(v)=v
+        h = self.W @ self._g(v) #[N,M],[B,M,1]->[B,N,1]
         f = self._f(h) #[B,N,1]
-        v_instant = self.W.t() @ f #[M,N],[B,N,1]->[B,M,1]
-        state = state + (self.dt/self.tau)*(v_instant - state) #[B,M,1]
+        v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
+        state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
         if debug:
             state_debug = {}
             for key in ['h', 'f', 'v_instant', 'state']:
@@ -106,7 +106,9 @@ class ModernHopfield(nn.Module):
             # E = ((v.transpose(-2,-1) @ g).squeeze(-2) - Lv
             #      + (h.transpose(-2,-1) @ f).squeeze(-2) - Lh
             #      - (f.transpose(-2,-1) @ self.W @ g).squeeze(-2))
-            return 0.5 * (v.transpose(-2,-1)@v).squeeze(-2) - torch.logsumexp(self.W@v, -2)
+            vv = v.transpose(-2,-1) @ v
+            lse = torch.logsumexp(self.W@v, -2)
+            return 0.5*vv.squeeze(-2) - lse
 
 
     def _h(self, g):
