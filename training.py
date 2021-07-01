@@ -1,5 +1,6 @@
 from collections import defaultdict
 import warnings
+import time
 
 import torch
 from torch import nn
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 
 
 class AssociativeTrain():
-    def __init__(self, net, train_loader, test_loader=None, only_class_loss=True, logger=None, print_every=100):
+    def __init__(self, net, train_loader, test_loader=None, loss_mode='class', logger=None, print_every=100):
         self.name = None
         self.net = net
         self.device = next(net.parameters()).device  # assume all model params on same device
@@ -15,7 +16,8 @@ class AssociativeTrain():
         self.train_loader = train_loader
         self.test_loader = test_loader
         self.n_class_units = train_loader.dataset.target_size #Mc
-        self.only_class_loss = only_class_loss
+        assert loss_mode in ['class', 'full']
+        self.loss_mode = 'class'
 
         self.print_every = print_every
         if logger is None:
@@ -31,7 +33,7 @@ class AssociativeTrain():
 
 
     def loss_fn(self, output, target):
-        if self.only_class_loss:
+        if self.loss_mode == 'class':
             output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
             target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
         loss = F.mse_loss(output, target, reduction='mean')
@@ -47,40 +49,41 @@ class AssociativeTrain():
         return acc
 
 
-    def __call__(self, epochs=10):
-        print(f'Training: {self.name}')
-        for epoch in range(1, epochs+1):
-            for batch_num, (input, target) in enumerate(self.train_loader):
-                self.iteration += 1
+    def __call__(self, epochs=10, label=''):
+        print(f'Training: {self.name}'+f', {label}' if len(label)>0 else label)
+        with Timer():
+            for epoch in range(1, epochs+1):
+                for batch_num, (input, target) in enumerate(self.train_loader):
+                    self.iteration += 1
 
-                input, target = input.to(self.device), target.to(self.device)
-                output = self.net(input)
+                    input, target = input.to(self.device), target.to(self.device)
+                    output = self.net(input)
 
-                self._update_parameters(output, target)
+                    self._update_parameters(output, target)
 
-                if self.iteration % self.print_every == 0:
-                    loss = self.loss_fn(output, target) #TODO this is getting computed twice in SGD
-                    acc = self.acc_fn(output, target)
-                    self.logger['iter'].append(self.iteration)
-                    self.logger['train_loss'].append(loss.item())
-                    self.logger['train_acc'].append(acc.item())
+                    if self.iteration % self.print_every == 0:
+                        loss = self.loss_fn(output, target) #TODO this is getting computed twice in SGD
+                        acc = self.acc_fn(output, target)
+                        self.logger['iter'].append(self.iteration)
+                        self.logger['train_loss'].append(loss.item())
+                        self.logger['train_acc'].append(acc.item())
 
-                    log_str = 'ep={:3d} it={:5d} loss={:.4f} acc={:.3f}' \
-                                 .format(epoch, self.iteration, loss, acc)
+                        log_str = 'ep={:3d} it={:5d} loss={:.4f} acc={:.3f}' \
+                                     .format(epoch, self.iteration, loss, acc)
 
-                    if self.test_loader is not None:
-                        with torch.no_grad():
-                            test_input, test_target = next(iter(self.test_loader))
-                            test_input, test_target = test_input.to(self.device), test_target.to(self.device)
+                        if self.test_loader is not None:
+                            with torch.no_grad():
+                                test_input, test_target = next(iter(self.test_loader))
+                                test_input, test_target = test_input.to(self.device), test_target.to(self.device)
 
-                            test_output = self.net(test_input)
-                            test_loss = self.loss_fn(test_output, test_target)
-                            test_acc = self.acc_fn(test_output, test_target)
+                                test_output = self.net(test_input)
+                                test_loss = self.loss_fn(test_output, test_target)
+                                test_acc = self.acc_fn(test_output, test_target)
 
-                        self.logger['test_loss'].append(test_loss.item())
-                        self.logger['test_acc'].append(test_acc.item())
-                        log_str += ' test_loss={:.4f} test_acc={:.3f}'.format(test_loss, test_acc)
-                    print(log_str)
+                            self.logger['test_loss'].append(test_loss.item())
+                            self.logger['test_acc'].append(test_acc.item())
+                            log_str += ' test_loss={:.4f} test_acc={:.3f}'.format(test_loss, test_acc)
+                        print(log_str)
         return dict(self.logger)
 
 
@@ -111,9 +114,9 @@ class FPTrain(AssociativeTrain):
         self.beta = net.beta
 
 
-    def __call__(self, epochs=10):
+    def __call__(self, *args, **kwargs):
         with torch.no_grad():
-            super().__call__(epochs)
+            return super().__call__(*args, **kwargs)
 
 
     def _update_parameters(self, output, target):
@@ -138,8 +141,8 @@ class FPTrain(AssociativeTrain):
         self.W -= self.lr*dLdW
         del dLdW
 
-        # in principle should not need this since it only releases memory to *outside*
-        # programs but in practice helps with OOM (perhaps due to PyTorch mem leaks?)
+        #in principle should not need this since it only releases memory to *outside*
+        #programs but in practice helps with OOM (perhaps due to PyTorch mem leaks?)
         torch.cuda.empty_cache()
 
 
@@ -155,7 +158,7 @@ class FPTrain(AssociativeTrain):
         h = self.W@g  # [N,M]@[B,M,1] --> [B,N,1]
         f = F.softmax(self.beta*h, dim=1)  # [B,N,1]
 
-        if self.only_class_loss:
+        if self.loss_mode == 'class':
             e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
         else:
             e = v-t #[B,M,1]
@@ -165,7 +168,7 @@ class FPTrain(AssociativeTrain):
         bFFW = self.beta * (f.squeeze().diag_embed() - f @ f.transpose(1, 2)) @ self.W
         A = torch.eye(M, device=self.device) - self.W.t() @ bFFW  # [M,M]+[M,N]@[B,N,M] --> [B,M,M]
 
-        if self.only_class_loss:  # only compute loss over the last Mc units, M=Md+Mc
+        if self.loss_mode == 'class': # only compute loss over the last Mc units, M=Md+Mc
             Ainv = torch.linalg.inv(A)  # [B,M,M]
             a = Ainv[:, -self.n_class_units:].transpose(1, 2) @ e #[B,M,Mc]@[B,Mc,1]--> [B,M,1]
             del Ainv
@@ -197,10 +200,40 @@ class FPTrain(AssociativeTrain):
         return dLdW
 
 
+###########
+# Helpers #
+###########
+class Timer():
+    def __init__(self, name=None):
+        self.name = name
 
-#################
-# Miscellaneous #
-#################
+    def __enter__(self):
+        print('Starting timer{}'.format(f': {self.name}...' if self.name is not None else '...'))
+        self.start_time = time.perf_counter()
+
+    def __exit__(self, *args):
+        stop_time = time.perf_counter()
+        elapsed = stop_time - self.start_time
+        elapsed_str = f'Time elapsed: {elapsed}'
+        if self.name is not None:
+            elapsed_str = f'{self.name}: {elapsed_str} sec'
+        print(elapsed_str)
+
+
+class Logger():
+    #TODO: tensorboard
+    def __init__(self, folder=None):
+        raise NotImplementedError()
+        self.folder = folder
+        self.log = defaultdict(list)
+
+    def write(self, key, value, iteration):
+        pass
+
+
+############
+# Not used #
+############
 class MPELoss(nn.modules.loss._Loss):
     """Like MSELoss, but takes the P power instead of Square. If P odd, takes absolute value first
     i.e. L = 1/N sum |x-y|^P where N = x.numel()

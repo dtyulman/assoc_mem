@@ -5,10 +5,10 @@ import joblib
 #custom
 import plots
 import data
-from utils import Timer
 from networks import ModernHopfield
 from training import SGDTrain, FPTrain
 
+#for my machine only TODO: remove
 import os
 if os.path.abspath('.').find('dtyulman') > -1:
     os.chdir('/home/dtyulman/projects/assoc_mem')
@@ -18,57 +18,70 @@ if os.path.abspath('.').find('dtyulman') > -1:
 #??? Can we remove the "dead" units?
 #??? Normalize each weight vector per hidden unit to 1 --> removes the single giant hidden unit?
 
-#%% train
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print('device =', device)
+ax=None
+legend = []
+for input_mode in ['init', 'cont', 'init+cont']:
+    for loss_mode in ['full', 'class']:
+        label = f'input={input_mode}_loss={loss_mode}'
+        legend.append(label)
 
-#get dataset
-train_data, test_data = data.get_aa_mnist_classification_data(include_test=True)
+        #%% train
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print('device =', device)
 
-#define network
-input_size = train_data[0][0].numel()
-hidden_size = 50
-dt = .05
-net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=100, dt=dt, num_steps=50./dt, fp_thres=1e-9)
-# net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=1, dt=1, num_steps=1, fp_thres=1e10)
-net.to(device)
-logger = None
+        #get dataset
+        train_data, test_data = data.get_aa_mnist_classification_data(include_test=True)
 
-#%%train network
-batch_size = 50
-debug_dataset = True #use tiny dataset which can be fully memorized
+        #define network
+        input_size = train_data[0][0].numel()
+        hidden_size = 50
+        dt = .05
+        net = ModernHopfield(input_size, hidden_size, fp_mode='iter', input_mode=input_mode, tau=1, beta=100, dt=dt, num_steps=50./dt, fp_thres=1e-9)
+        # net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=1, dt=1, num_steps=1, fp_thres=1e10)
+        net.to(device)
+        logger = None
 
-if debug_dataset:
-    train_data.dataset.data = train_data.dataset.data[:50]
-    train_data.dataset.targets = train_data.dataset.targets[:50]
-    if batch_size < len(train_data):
-        test_loader = torch.utils.data.DataLoader(train_data, batch_size=50)
-    else:
-        test_loader = None
-else:
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
+        #%%train network
+        batch_size = 50
+        debug_dataset = True #use tiny dataset which can be fully memorized
 
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+        if debug_dataset:
+            train_data.dataset.data = train_data.dataset.data[:50]
+            train_data.dataset.targets = train_data.dataset.targets[:50]
+            if batch_size < len(train_data):
+                test_loader = torch.utils.data.DataLoader(train_data, batch_size=50)
+            else:
+                test_loader = None
+        else:
+            test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
 
-only_class_loss = False
-# trainer = SGDTrain(net, train_loader, test_loader, logger=logger, only_class_loss=only_class_loss, print_every=10)
-trainer = FPTrain(net, train_loader, test_loader, logger=logger, only_class_loss=only_class_loss, print_every=10, lr=0.1)
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
-with Timer(device):
-   logger = trainer(epochs=50)
+        # trainer = SGDTrain(net, train_loader, test_loader, logger=logger, only_class_loss=only_class_loss, print_every=10)
+        trainer = FPTrain(net, train_loader, test_loader, logger=logger, loss_mode=loss_mode, print_every=10, lr=0.01)
 
+        logger = trainer(epochs=1000, label=label)
 
-joblib.dump(logger, 'log.pkl')
-torch.save(net, 'net.pt')
+        joblib.dump(logger, f'log_{label}.pkl')
+        torch.save(net, f'net_{label}.pt')
+
 #%% plot
+# ax=None
+# ll = []
+# for log_fname in filter(lambda s: s.endswith('pkl'), next(os.walk('.'))[2]):
+#     logger = joblib.load(log_fname)
+#     label = log_fname[4:-4]
+#     ax = plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
+#                   # logger['test_loss'], logger['test_acc'],
+#                   iters=logger['iter'],
+#                   title='ModernHopfield (N={}), toy, (B={})'.format(net.hidden_size, batch_size),
+#                   ax=ax)
+#     ll.append(label)
+# ax[0].legend(ll)
 
 # net.to('cpu')
-# plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
-#               # logger['test_loss'], logger['test_acc'],
-#               iters=logger['iter'],
-#               title='ModernHopfield (N={}), toy, (B={})'.format(net.hidden_size, batch_size))
-
-# plots.plot_weights_mnist(net.W)
+# axW = plots.plot_weights_mnist(net.W)
+# axW.set_title(label)
 
 # # %%
 # # n_per_class = 10
