@@ -7,7 +7,7 @@ import plots
 import data
 from utils import Timer
 from networks import ModernHopfield
-from training import sgd_train, fixed_point_train
+from training import SGDTrain, FPTrain
 
 import os
 if os.path.abspath('.').find('dtyulman') > -1:
@@ -29,9 +29,9 @@ train_data, test_data = data.get_aa_mnist_classification_data(include_test=True)
 input_size = train_data[0][0].numel()
 hidden_size = 50
 dt = .05
-# net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, dt=dt, num_steps=50./dt, fp_thres=1e-9)
-net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=1, dt=1, num_steps=1, fp_thres=1e10)
-
+net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=100, dt=dt, num_steps=50./dt, fp_thres=1e-9)
+# net = ModernHopfield(input_size, hidden_size, fp_mode='iter', tau=1, beta=1, dt=1, num_steps=1, fp_thres=1e10)
+net.to(device)
 logger = None
 
 #%%train network
@@ -50,19 +50,22 @@ else:
 
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
+trainer = SGDTrain(net, train_loader, test_loader, logger=logger, print_every=10)
+# trainer = FPTrain(net, train_loader, test_loader, logger=logger, print_every=10, n_class_units=10, lr=0.1)
+
 with Timer(device):
-    net.to(device)
-    logger = sgd_train(net, train_loader, test_loader, logger=logger, epochs=4000, print_every=10)
-    # logger = fixed_point_train(net, train_loader, test_loader, logger=logger, epochs=10000, print_every=10, lr=.05)
+    logger = trainer(epochs=100)
+
 
 joblib.dump(logger, 'log.pkl')
 torch.save(net, 'net.pt')
 #%% plot
+
 net.to('cpu')
 plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
               # logger['test_loss'], logger['test_acc'],
               iters=logger['iter'],
-              title='ModernHopfield (N={}), toy, (B={})'.format(hidden_size, batch_size))
+              title='ModernHopfield (N={}), toy, (B={})'.format(net.hidden_size, batch_size))
 
 plots.plot_weights_mnist(net.W)
 
@@ -85,6 +88,8 @@ net.num_steps = int(100/net.dt)
 net.fp_thres = 0
 state_debug_history = net(debug_input, debug=True)
 # plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train)
+
+# plots.plot_energy_dynamics(state_debug_history, net)
 
 fig, ax = plt.subplots(2,1, sharex=True)
 plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[0])
