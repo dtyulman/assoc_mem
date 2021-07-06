@@ -4,6 +4,11 @@ from copy import deepcopy
 
 
 class Config(MutableMapping):
+    """Nested dictionary that can be accessed by dot-separated keys
+    e.g. cfg['a.b.c'] == cfg['a']['b']['c']"""
+    #alternative: https://stackoverflow.com/questions/3387691/how-to-perfectly-override-a-dict/39375731#39375731
+    #TODO: consider making immutable (replace set/delitem() with updated() method which returns a
+    #copy with corresponding key added/removed/modified and change _storage to namedtuple)
     def __init__(self, input_dict):
         self._storage = {}
         for key, value in input_dict.items():
@@ -11,18 +16,28 @@ class Config(MutableMapping):
                 value = Config(value)
             self[key] = value
 
+    def _get_storage_dict(self, keypath, create=False):
+        if keypath == '':
+            return self._storage
+        storage = self._storage
+        for key in keypath.split('.'):
+            if create and key not in storage:
+                storage[key] = Config({})
+            storage = storage[key]._storage
+        return storage
+
     def __getitem__(self, nestedkey):
         keypath, _, key = nestedkey.rpartition('.')
-        return self._follow_key_path(keypath)[key]
+        return self._get_storage_dict(keypath)[key]
 
     def __setitem__(self, nestedkey, value):
         assert isinstance(nestedkey, str), 'Only string keys allowed'
         keypath, _, key = nestedkey.rpartition('.')
-        self._follow_key_path(keypath, create=True)[key] = value
+        self._get_storage_dict(keypath, create=True)[key] = value
 
     def __delitem__(self, nestedkey):
         keypath, _, key = nestedkey.rpartition('.')
-        return self._follow_key_path(keypath).__delitem__(key)
+        return self._get_storage_dict(keypath).__delitem__(key)
 
     def __iter__(self):
         return self._storage.__iter__()
@@ -44,23 +59,14 @@ class Config(MutableMapping):
         string += indent_str + '})'
         return string
 
-    def _follow_key_path(self, keypath, create=False):
-        if keypath == '':
-            return self._storage
-        storage = self._storage
-        for key in keypath.split('.'):
-            if create and key not in storage:
-                storage[key] = Config({})
-            storage = storage[key]._storage
-        return storage
-
 
 def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     """With baseconfig as the default, return a list of configs with the entries in deltaconfigs.keys()
     looped over the corresponding lists in deltaconfigs.values()"""
     configs = []
     labels = []
-    assert all([param in baseconfig for param in deltaconfigs]), 'Varied parameters must exist in baseconfig'
+    assert all([param in baseconfig for param in deltaconfigs]), \
+        'Varied parameters must exist in baseconfig'
     if mode == 'combinatorial':
         for values in itertools.product(*deltaconfigs.values()):
             config = deepcopy(baseconfig)
@@ -69,10 +75,11 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
                 config[param] = value
                 label.append(f'{param.rpartition(".")[-1]}={value}')
             configs.append(config)
-            labels.append('_'.join(label))
+            labels.append(' '.join(label))
     elif mode == 'sequential':
         len_params_list = len(list(deltaconfigs.values())[0])
-        assert all([len(values)==len_params_list for values in deltaconfigs.values()]), 'Parameter lists must be of same length'
+        assert all([len(values)==len_params_list for values in deltaconfigs.values()]), \
+            'Parameter lists must be of same length'
         raise NotImplementedError()
     else:
         raise ValueError(f'Invalid mode: {mode}')
@@ -84,7 +91,7 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
 ###################
 # Training
 train_config = Config({
-    'name': 'FPT', #FPT, SGD
+    'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
     'lr': 0.01, #for FPT only
     'print_every': 10,
@@ -111,8 +118,8 @@ net_config = Config({
 # Datasets
 data_config = Config({
     'name': 'MNIST',
-    'subset': False, #positive integer takes only first N items
-    'test': True
+    'subset': False, #positive integer or False: takes only first N items
+    'include_test': True
     })
 
 

@@ -8,7 +8,9 @@ import torch.nn.functional as F
 
 
 class AssociativeTrain():
-    def __init__(self, net, train_loader, test_loader=None, loss_mode='class', logger=None, print_every=100):
+    def __init__(self, net, train_loader, test_loader=None, loss_mode='class',
+                 logger=None, print_every=100):#, **kwargs):
+        #kwargs ignores any extra values passed in via a Config
         self.name = None
         self.net = net
         self.device = next(net.parameters()).device  # assume all model params on same device
@@ -50,6 +52,7 @@ class AssociativeTrain():
 
 
     def __call__(self, epochs=10, label=''):
+
         print(f'Training: {self.name}'+f', {label}' if len(label)>0 else label)
         with Timer():
             for epoch in range(1, epochs+1):
@@ -90,6 +93,7 @@ class AssociativeTrain():
 
 class SGDTrain(AssociativeTrain):
     def __init__(self, net, train_loader, test_loader=None, **kwargs):
+        #explicit test_loader kwarg also allows it to be specified as positional arg
         super().__init__(net, train_loader, **kwargs)
         self.name = 'SGD'
         self.optimizer = torch.optim.Adam(net.parameters())
@@ -105,6 +109,8 @@ class SGDTrain(AssociativeTrain):
 
 class FPTrain(AssociativeTrain):
     def __init__(self, net, train_loader, test_loader=None, lr=0.1, **kwargs):
+        #explicit test_loader kwarg also allows it to be specified as positional arg
+        #lr is additional kwarg that does not get passed into super
         super().__init__(net, train_loader, **kwargs)
         self.name = 'FPT'
         self.lr = lr

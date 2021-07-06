@@ -37,6 +37,8 @@ def plot_weights_mnist(W, max_n_rows=1024, plot_class_pixels=True, ax=None):
 
     if ax is None:
         fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
 
     try:
         W = W.cpu().detach().numpy()

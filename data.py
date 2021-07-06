@@ -28,7 +28,8 @@ class AssociativeDataset(Dataset):
         return len(self.dataset)
 
 
-def get_aa_mnist_classification_data(include_test=False, balanced=False, crop=False, downsample=False):
+def get_aa_mnist_classification_data(include_test=False, balanced=False,
+                                     crop=False, downsample=False):
     data_transforms_list = [transforms.ToTensor()]
     if balanced: #put data in range [+1,-1] instead of [0,1]
         data_transforms_list.append(transforms.Lambda(lambda x: 2*x-1 ))
@@ -40,7 +41,6 @@ def get_aa_mnist_classification_data(include_test=False, balanced=False, crop=Fa
     #would like to do .view(-1,1) to avoid copy but throws error if cropping
     data_transforms_list.append( transforms.Lambda(lambda x: x.reshape(-1,1)) )
 
-
     to_vec = transforms.Compose(data_transforms_list)
     to_onehot = transforms.Lambda(lambda y: torch.zeros(10,1)
                                   .scatter_(0, torch.tensor([[y]]), value=1))
@@ -48,12 +48,15 @@ def get_aa_mnist_classification_data(include_test=False, balanced=False, crop=Fa
     train_data = datasets.MNIST(root='./data/', download=True, transform=to_vec,
                                 target_transform=to_onehot)
     train_data = AssociativeDataset(train_data)
+
     if include_test:
         test_data = datasets.MNIST(root='./data/', train=False, download=True, transform=to_vec,
                                    target_transform=to_onehot)
         test_data = AssociativeDataset(test_data)
-        return train_data, test_data
-    return train_data
+    else:
+        test_data = None
+
+    return train_data, test_data
 
 
 def filter_classes(dataset, select_classes='all', n_per_class=None, sort_by_class=True):

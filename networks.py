@@ -71,6 +71,7 @@ class ModernHopfield(nn.Module):
     #     for step in range(self.num_steps):
     #         p1 = self.update_state(p0, debug=debug) #[B,M,1]
     #         if self.fp_mode=='del2': #like scipy.optimize.fixed_point() w/ use_accel=True
+    #https://github.com/scipy/scipy/blob/v1.7.0/scipy/optimize/minpack.py#L899-L942
     #             p2 = self.update_state(p1)
     #             d = p2 - 2.*p1 + p0
     #             del2 = p0 - torch.square(p1-p0)/d
