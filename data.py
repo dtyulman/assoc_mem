@@ -6,6 +6,54 @@ from torchvision import datasets, transforms
 
 
 class AssociativeDataset(Dataset):
+    def __init__(self, dataset, perturb_frac=0.5, perturb_mode='rand', perturb_value=0.):
+        self.dataset = dataset
+        self.input_size = self.target_size = dataset[0][0].numel()
+
+        self.perturb_frac = perturb_frac
+        assert perturb_mode in ['rand', 'first', 'last']
+        self.perturb_mode = perturb_mode
+        if isinstance(perturb_value, str):
+            assert perturb_value in ['rand', 'flip']
+        self.perturb_value = perturb_value
+
+
+    def _perturb(self, datapoint):
+        #perturb_mask indicates which entries will be perturbed
+        datapoint = deepcopy(datapoint)
+
+        if self.perturb_mode == 'rand':
+            perturb_mask = torch.rand_like(datapoint) < self.perturb_frac
+        elif self.perturb_mode in ['first', 'last']:
+            perturb_len = int(len(datapoint)*self.perturb_frac)
+            perturb_mask = torch.zeros(datapoint.shape, dtype=bool)
+            if self.perturb_mode == 'first':
+                perturb_mask[:perturb_len] = 1
+            elif self.perturb_mode == 'last':
+                perturb_mask[-perturb_len:] = 1
+
+        if self.perturb_value == 'rand':
+            datapoint[perturb_mask] = torch.rand_like(datapoint)[perturb_mask]
+        elif self.perturb_value == 'flip':
+            datapoint[perturb_mask] = -datapoint[perturb_mask]
+        else:
+            datapoint[perturb_mask] = self.perturb_value
+
+        return datapoint
+
+
+    def __getitem__(self, idx):
+        target, _ = self.dataset[idx]
+        input = self._perturb(target)
+        return input, target
+
+
+    def __len__(self):
+        return len(self.dataset)
+
+
+
+class AssociativeClassifyDataset(Dataset):
     """
     Convert a dataset with (input, target) pairs to work with autoassociative
     memory networks, returning (aa_input, aa_target) pairs, where
@@ -28,8 +76,34 @@ class AssociativeDataset(Dataset):
         return len(self.dataset)
 
 
-def get_aa_mnist_classification_data(include_test=False, balanced=False,
-                                     crop=False, downsample=False):
+
+def get_aa_mnist_data(include_test=False, balanced=False, crop=False, downsample=False,
+                       mode='classify', **kwargs):
+    if mode == 'classify':
+        DatasetClass = AssociativeClassifyDataset
+    elif mode == 'complete':
+        DatasetClass = AssociativeDataset
+
+    train_data, test_data = get_mnist_data(include_test, balanced, crop, downsample)
+    train_data = DatasetClass(train_data, **kwargs)
+    if test_data:
+        test_data = DatasetClass(test_data, **kwargs)
+    return train_data, test_data
+
+
+def get_aa_debug_batch(train_data, select_classes='all', n_per_class=None):
+    #train_data is an AssociativeDataset or AssociativeClassifyDataset object
+    debug_data = deepcopy(train_data)
+    debug_data.dataset = filter_classes(debug_data.dataset, select_classes=select_classes,
+                                        n_per_class=n_per_class)
+
+    debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data,
+                                                                      batch_size=len(debug_data))
+                                          ))
+    return debug_input, debug_target
+
+
+def get_mnist_data(include_test=False, balanced=False, crop=False, downsample=False):
     data_transforms_list = [transforms.ToTensor()]
     if balanced: #put data in range [+1,-1] instead of [0,1]
         data_transforms_list.append(transforms.Lambda(lambda x: 2*x-1 ))
@@ -47,14 +121,8 @@ def get_aa_mnist_classification_data(include_test=False, balanced=False,
 
     train_data = datasets.MNIST(root='./data/', download=True, transform=to_vec,
                                 target_transform=to_onehot)
-    train_data = AssociativeDataset(train_data)
-
-    if include_test:
-        test_data = datasets.MNIST(root='./data/', train=False, download=True, transform=to_vec,
-                                   target_transform=to_onehot)
-        test_data = AssociativeDataset(test_data)
-    else:
-        test_data = None
+    test_data = datasets.MNIST(root='./data/', train=False, download=True, transform=to_vec,
+                               target_transform=to_onehot) if include_test else None
 
     return train_data, test_data
 
