@@ -1,83 +1,38 @@
-import importlib, datetime
+import os, importlib
 
 #third-party
 import torch, joblib
 
-#custom
-import plots, data, configs
+import utils, data, training, networks
+import configs as cfg
 
 #for my machine only TODO: remove
-import os
 if os.path.abspath('.').find('dtyulman') > -1:
     os.chdir('/home/dtyulman/projects/assoc_mem')
 
 #??? Train on one step --> probably won't extrapolate to many
-#??? Try "full" autoassociative task
 #??? Can we remove the "dead" units?
-#??? Normalize each weight vector per hidden unit to 1 --> removes the single giant hidden unit?
 
-def run_config(config, savename=None, savedir='.'):
-    #data
-    if config['data']['name'] == 'MNIST':
-        train_data, test_data = data.get_aa_mnist_classification_data(config['data']['include_test'])
-    if config['data']['subset']:
-        train_data.dataset.data = train_data.dataset.data[:50]
-        train_data.dataset.targets = train_data.dataset.targets[:50]
-
-    #network
-    if config['net']['input_size'] is None:
-        config['net']['input_size'] = train_data[0][0].numel()
-    NetClass = getattr(importlib.import_module('networks'), config['net'].pop('class'))
-    net = NetClass(**config['net'])
-
-    #training
-    epochs = config['train'].pop('epochs')
-    B = config['train'].pop('batch_size')
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=B, shuffle=True)
-    if test_data:
-        test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
-    else:
-        if B < len(train_data):
-            test_loader = torch.utils.data.DataLoader(train_data, batch_size=B)
-        else:
-            test_loader = None
-
-    TrainerClass = getattr(importlib.import_module('training'), config['train'].pop('class'))
-    trainer = TrainerClass(net, train_loader, test_loader, **config['train'])
-
-    #go
-    logger = trainer(epochs, label=savename)
-    if savename:
-        joblib.dump(logger, os.path.join(savedir, f'log_{savename}.pkl'))
-        torch.save(net, os.path.join(savedir, f'net_{savename}.pt'))
-    return net, logger
 #%%
-
-# TODO: automatically make this folder structure
-# assoc_mem/results/
-# | -- yyyy-mm-dd/
-# | | -- nnnn/
-# | | | -- baseconfig.txt
-# | | | -- deltaconfiglabel/
-# | | | | -- net.pt
-# | | | | -- log.pkl
-# | | | | -- config.pkl
-
 #get configs list
-baseconfig = configs.Config({
+baseconfig = cfg.Config({
     'train': {'class': 'FPTrain', #FPTrain, SGDTrain
               'batch_size': 50,
-              'lr': 0.01, #for FPT only
+              'lr': .1,
+              'lr_decay': 1.,
               'print_every': 10,
               'loss_mode': 'full', # full, class
-              'epochs':1000,
+              'epochs': 500,
+              'device': 'cuda', #cuda, cpu
               },
 
     'net': {'class': 'ModernHopfield',
             'input_size': None, #if None, infer from dataset
             'hidden_size': 50,
-            'beta': 100,
+            'normalize_weight': True,
+            'beta': 10,
             'tau': 1,
+            'normalize_input': True,
             'input_mode': 'init', #init, cont, init+cont, clamp
             'dt': 0.05,
             'num_steps': 1000,
@@ -86,87 +41,141 @@ baseconfig = configs.Config({
             },
 
     'data': {'name': 'MNIST',
-             'subset': 50, #positive integer or False: takes only first N items
+             'mode': 'complete', #classify, complete
+             'perturb_frac': 0.5,
+             'perturb_mode': 'last',
+             'perturb_value': 0,
+             'subset': 50, #if int, takes only first N items
              'include_test': False,
+             'balanced': False,
+             'crop': False,
+             'downsample': False
              }
-    }) #alternatively do configs.get_config() and modify defaults
+    }) #alternatively do cfg.get_config() and modify defaults
 
-configslist, labelslist = configs.flatten_config_loop(baseconfig,
-                              {'net.input_mode': ['init', 'cont', 'init+cont'],
-                               'train.loss_mode': ['full', 'class']})
+# deltaconfigs = {'net.num_steps': [1, 1000],
+#                 'train.loss_mode': ['full', 'class'],
+#                 'net.input_mode': ['init', 'cont', 'init+cont'],
+#                 }
+deltaconfigs = {}
 
-#set up save dir
-root = os.path.dirname(os.path.abspath(__file__))
-ymd = datetime.date.today().strftime('%Y-%m-%d')
-saveroot = os.path.join(root, 'results', ymd)
-try:
-    run_number = int(next(os.walk(saveroot))[1][-1])+1
-except StopIteration:
-    run_number = 0
-savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
-os.makedirs(savedir)
-with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
-    f.write(repr(baseconfig))
+configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
 
-#go
-for config,label in zip(configslist, labelslist):
-    net, logger = run_config(config, savename=label, savedir=savedir)
+#%%
+# savedir = utils.initialize_savedir(baseconfig)
+for config, label in zip(configs, labels):
 
+    #data
+    subset = config['data'].pop('subset')
+    if config['data'].pop('name') == 'MNIST':
+        train_data, test_data = data.get_aa_mnist_data(**config['data'])
+    if subset:
+        train_data.dataset.data = train_data.dataset.data[:50]
+        train_data.dataset.targets = train_data.dataset.targets[:50]
+
+    #network
+    if config['net']['input_size'] is None:
+        config['net']['input_size'] = train_data[0][0].numel()
+    NetClass = getattr(networks, config['net'].pop('class'))
+    net = NetClass(**config['net'])
+
+    #training
+    device = config['train'].pop('device')
+    epochs = config['train'].pop('epochs')
+    batch_size = config['train'].pop('batch_size')
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    if test_data:
+        test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
+    else:
+        if batch_size < len(train_data):
+            test_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size)
+        else:
+            test_loader = None
+    TrainerClass = getattr(training, config['train'].pop('class'))
+    trainer = TrainerClass(net, train_loader, test_loader, **config['train'])
+
+    #go
+    net.to(device)
+    logger = trainer(epochs, label=label)
+
+    # joblib.dump(logger, os.path.join(savedir, f'log_{label}.pkl'))
+    # torch.save(net, os.path.join(savedir, f'net_{label}.pt'))
+
+    print()
 
 
 #%% plot
-ax=None
-ll = []
-for log_fname in filter(lambda s: s.endswith('pkl'), next(os.walk('.'))[2]):
-    logger = joblib.load(log_fname)
-    label = log_fname[4:-4].replace('_', ', ')
-    ax = plots.plot_loss_acc(logger['train_loss'], logger['train_acc'],
-                  # logger['test_loss'], logger['test_acc'],
-                  iters=logger['iter'],
-                  title='ModernHopfield, MNIST_50, FPT',
-                  ax=ax)
-    ll.append(label)
-ax[0].legend(ll)
+import plots
+import matplotlib.pyplot as plt
+
+#TODO: plot v-t averaged over B
+
+title = '{net}:{hid} W:{norm} $\\beta$={bet} $\\tau$={tau} in:{inp}\n' \
+        '{trn} B={bat} lr={lr} L:{loss} MNIST{sub}'.format(
+            net = 'MH',
+            hid = net.hidden_size,
+            norm = "nml" if net.normalize_weight else 'raw',
+            bet = net.beta,
+            tau = net.tau,
+            inp = net.input_mode,
+            trn = trainer.name[:2],
+            bat = train_loader.batch_size,
+            lr = trainer.lr,
+            loss = trainer.loss_mode,
+            sub = f':{subset}' if subset else '')
+
+net.to('cpu')
+#%%
+plots.plot_loss_acc(logger['train_loss'], logger['train_acc'], iters=logger['iter'])
 
 #%%
-import matplotlib.pyplot as plt
-fig, ax = plt.subplots(2,3)
-for i, net_fname in enumerate(filter(lambda s: s.endswith('.pt'), next(os.walk('.'))[2])):
-    net = torch.load(net_fname)
-    label = log_fname[4:-4].replace('_', ' ')
-    net.to('cpu')
+plot_class=True
+if net.normalize_weight:
+    fig, ax = plt.subplots(1,2)
+    plots.plot_weights_mnist(net._W, plot_class=plot_class, ax=ax[0])
+    ax[0].set_title('Raw')
+    plots.plot_weights_mnist(net.W, plot_class=plot_class, ax=ax[1])
+    ax[1].set_title('Normalized')
+    w,h = fig.get_size_inches()
+    fig.set_size_inches(w*1.5, h)
+else:
+    ax = plots.plot_weights_mnist(net._W, plot_class=plot_class)
+    ax.set_title('Raw (no normalization)')
+    fig = ax.get_figure()
+fig.tight_layout()
 
-    a = plots.plot_weights_mnist(net.W, ax=ax.flatten()[i])
-    a.set_title(label)
 
-# # %%
-# # n_per_class = 10
-# # debug_data = data.AssociativeDataset(data.filter_classes(test_data.dataset,n_per_class=n_per_class))
-# # debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
-# # state_debug_history = net(debug_input, debug=True)
-# # plots.plot_hidden_max_argmax(state_debug_history, n_per_class)
+#%%
+n_per_class = 5
+debug_input, debug_target = data.get_aa_debug_batch(train_data)
+plots.plot_data_batch(debug_input, debug_target)
 
-# #%%
-# import matplotlib.pyplot as plt
-# net.to('cpu')
+state_debug_history = net(debug_input, debug=True)
+plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True)
 
-# n_per_class = 1
-# debug_data = data.AssociativeDataset(data.filter_classes(train_data.dataset,n_per_class=n_per_class))
-# debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
-# num_steps_train = net.num_steps
-# net.num_steps = int(100/net.dt)
-# net.fp_thres = 0
-# state_debug_history = net(debug_input, debug=True)
-# # plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train)
+#%%
+n_per_class = 1
+debug_input, debug_target = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 
-# # plots.plot_energy_dynamics(state_debug_history, net)
+num_steps_train = net.num_steps
+net.num_steps = 200#int(100/net.dt)
+net.fp_thres = 0
+state_debug_history = net(debug_input, debug=True)
 
-# fig, ax = plt.subplots(2,1, sharex=True)
-# plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[0])
-# plots.plot_max_hidden_dynamics(state_debug_history, num_steps_train=num_steps_train, ax=ax[1])
-# fig.suptitle('FPT')
-# ax[0].set_xlabel('')
-# ax[0].legend_.remove()
-# w,h = fig.get_size_inches()
-# fig.set_size_inches(w,1.5*h)
-# fig.tight_layout()
+fig, ax = plt.subplots(2,2, sharex=True)
+ax = ax.flatten()
+
+plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train, ax=ax[0])
+plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[1])
+plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps_train, ax=ax[2])
+plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
+
+[a.set_xlabel('') for a in ax[0:2]]
+[a.legend_.remove() for a in ax[0:-1]]
+fig.suptitle(title)
+w,h = fig.get_size_inches()
+fig.set_size_inches(1.5*w,1.5*h)
+fig.tight_layout()
+
+#%%
+plots.plot_state_dynamics(state_debug_history)

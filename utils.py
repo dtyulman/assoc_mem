@@ -1,7 +1,39 @@
-import gc
-import torch
+import os, datetime, gc
+import torch, joblib
 
-## MEM utils ##
+def initialize_savedir(baseconfig):
+    # TODO: folder structure should be
+    # assoc_mem/results/
+    # | -- yyyy-mm-dd/
+    # | | -- nnnn/
+    # | | | -- baseconfig.txt
+    # | | | -- deltaconfiglabel/
+    # | | | | -- net.pt
+    # | | | | -- log.pkl
+    # | | | | -- config.pkl
+    root = os.path.dirname(os.path.abspath(__file__))
+    ymd = datetime.date.today().strftime('%Y-%m-%d')
+    saveroot = os.path.join(root, 'results', ymd)
+    try:
+        run_number = int(sorted(os.listdir(saveroot))[-1])+1
+    except (FileNotFoundError, IndexError):
+        run_number = 0
+    savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
+    os.makedirs(savedir)
+    with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
+        f.write(repr(baseconfig)+'\n')
+    print(f'Saving to: {savedir}')
+    return savedir
+
+
+def load_from_dir(savedir):
+    net = torch.load(os.path.join(savedir, 'net.pt'))
+    logger = joblib.load(os.path.join(savedir, 'log.pkl'))
+    config = joblib.load(os.path.join(savedir, 'config.pkl'))
+
+    return net, logger, config
+
+
 def mem_report():
     #https://gist.github.com/Stonesjtu/368ddf5d9eb56669269ecdf9b0d21cbe
     '''Report the memory usage of the tensor.storage in pytorch

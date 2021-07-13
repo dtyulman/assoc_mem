@@ -1,6 +1,5 @@
 import warnings
 
-import scipy.optimize as spo
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -8,14 +7,19 @@ from torch import nn
 
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
-    def __init__(self, input_size, hidden_size, beta=None, tau=None,
-                 input_mode='init', num_steps=None, dt=1, fp_thres=0.001, fp_mode='iter'):
+    def __init__(self, input_size, hidden_size, beta=None, tau=None, normalize_weight=False,
+                 normalize_input = False, input_mode='init', num_steps=None, dt=1,
+                 fp_thres=0.001, fp_mode='iter'):
+
         super().__init__()
         self.input_size = input_size # M
         self.hidden_size = hidden_size # N
 
-        self.W = nn.Parameter(torch.zeros(self.hidden_size, self.input_size)) #[N,M]
-        nn.init.xavier_normal_(self.W)
+        self._W = nn.Parameter(torch.zeros(self.hidden_size, self.input_size)) #[N,M]
+        nn.init.kaiming_normal_(self._W)
+        assert normalize_weight in [True, False]
+        self.normalize_weight = normalize_weight
+        self._maybe_normalize_weight()
 
         self.beta = nn.Parameter(torch.tensor(beta or 1.), requires_grad=(beta is None))
         self.tau = nn.Parameter(torch.tensor(tau or 1.), requires_grad=(tau is None))
@@ -24,22 +28,41 @@ class ModernHopfield(nn.Module):
         self.dt = dt
         self.num_steps = int(1/self.dt) if num_steps is None else int(num_steps)
 
-        assert fp_mode in ['iter', 'del2'], f"Invalid fp mode: '{fp_mode}'"
+        assert fp_mode in ['iter'], f"Invalid fp mode: '{fp_mode}'" #TODO: 'del2'
         self.fp_mode = fp_mode
         self.fp_thres = fp_thres
 
-        assert input_mode in ['init', 'cont', 'init+cont'], f"Invalid input mode: '{input_mode}' "#, 'clamp']
+        assert input_mode in ['init', 'cont', 'init+cont'], f"Invalid input mode: '{input_mode}' "#TODO: 'clamp'
         self.input_mode = input_mode
+        self.normalize_input = normalize_input
 
 
-    def forward(self, input, debug=False):
+    def _maybe_normalize_weight(self):
+        if self.normalize_weight:
+            #W is normalized, _W is raw; computation is done with W, learning is done on _W
+            self.W = self._W / self._W.norm(dim=1, keepdim=True)
+        else:
+            self.W = self._W
+
+
+    def _set_state_and_input(self, input):
+        if self.normalize_input:
+            input /= input.norm(dim=1, keepdim=True)
+
         if 'init' in self.input_mode:
             state = input #[B,M,1]
         else:
             state = torch.zeros_like(input)
 
         if 'cont' not in self.input_mode:
-            input = 0
+            input = torch.zeros_like(input)
+
+        return state, input
+
+
+    def forward(self, input, debug=False):
+        self._maybe_normalize_weight()
+        state, input = self._set_state_and_input(input)
 
         if debug:
             state_debug_history = []
@@ -94,7 +117,7 @@ class ModernHopfield(nn.Module):
     #     return p
 
 
-    def update_state(self, v, I=0., debug=False):
+    def update_state(self, v, I=torch.tensor(0.), debug=False):
         """
         Continuous: tau*dv/dt = -v + X*softmax(X^T*v)
         Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + X*softmax(X^T*v(t))]
@@ -105,25 +128,34 @@ class ModernHopfield(nn.Module):
         state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
         if debug:
             state_debug = {}
-            for key in ['h', 'f', 'v_instant', 'state']:
+            for key in ['I', 'h', 'f', 'v_instant', 'state']:
                 state_debug[key] = locals()[key].detach()
             return state_debug
         return state
 
 
-    def energy(self, v):
-        with torch.no_grad():
-            #more general:
-            # E = ((v.transpose(-2,-1) @ g).squeeze(-2) - Lv
-            #      + (h.transpose(-2,-1) @ f).squeeze(-2) - Lh
-            #      - (f.transpose(-2,-1) @ self.W @ g).squeeze(-2))
-            vv = v.transpose(-2,-1) @ v
-            lse = torch.logsumexp(self.W@v, -2)
-            return 0.5*vv.squeeze(-2) - lse
+    @torch.no_grad()
+    def energy(self, v, I=torch.tensor(0.)):
+        #more general:
+        g = self._g(v)
+        h = self._h(g)
+        f = self._f(h)
+        Lv = self._Lv(v)
+        Lh = self._Lh(h)
+
+        vg = ((v-I).transpose(-2,-1) @ g).squeeze(-2)
+        hf = (h.transpose(-2,-1) @ f).squeeze(-2)
+        fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
+        E = (vg - Lv) + (hf - Lh) - fWg
+
+        # vv = ((v/2. - I).transpose(-2,-1) @ v).squeeze(-2)
+        # lse = torch.logsumexp(self.W@v, -2)
+        # E = vv - lse
+        return E
 
 
     def _h(self, g):
-        """h_u = \sum_i W_ui*g_i, ie. h = Wg"""
+        """h_u = \sum_i W_ui*g_i, ie. h = W*g"""
         return self.W @ g #[N,M],[B,M,1]->[B,N,1]
 
 
@@ -132,8 +164,8 @@ class ModernHopfield(nn.Module):
         return F.softmax(self.beta * h, dim=-2) #[B,N,1] or [N,1]
 
 
-    def _v(self, f, I=0):
-        """v_i = \sum_u W_iu*f_u + I_i, ie. v = Wf + I """
+    def _v(self, f, I=torch.tensor(0.)):
+        """v_i = \sum_u W_iu*f_u + I_i, ie. v = W^T*f + I """
         return self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
 
 
@@ -148,5 +180,6 @@ class ModernHopfield(nn.Module):
 
 
     def _Lv(self, v):
-        vv = v.transpose(-2,-1)@v #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
+        """g_i(v) = dLv/dv"""
+        vv = v.transpose(-2,-1) @ v #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
         return 0.5*vv.squeeze(-2) #[B,1,1]->[B,1] or #[1,1]->[1]
