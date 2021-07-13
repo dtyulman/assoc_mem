@@ -6,6 +6,8 @@ results/
 *.png
 *.pt
 *.pkl
+*.pdf
+*.gv
 
 
 # Byte-compiled / optimized / DLL files
