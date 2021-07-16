@@ -1,4 +1,4 @@
-import itertools
+import itertools, warnings
 from collections.abc import MutableMapping, Mapping
 from copy import deepcopy
 
@@ -86,6 +86,42 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     return configs, labels
 
 
+def verify_items(config, constraint, mode='raise'):
+    """For each key in the constraint dict, asserts that config[key] is equal to that value. If not,
+    raises an error or sets the config item to that value and issues a warning"""
+    for key, value in constraint.items():
+        if config[key] != value:
+            if mode == 'raise':
+                raise ValueError(f"Config error: {key}={config[key]}, requires {value}")
+            elif mode == 'set':
+                warnings.warn(f"Config warning: setting {key}={config[key]} to {value}")
+                config[key] = value
+            else:
+                raise ValueError(f"Invalid verify_item mode: '{mode}'")
+    return config
+
+
+def verify_config(config, mode='raise'):
+    if config['data']['mode'] == 'complete':
+        constraint = {
+            'train.acc_fn' : 'mae',
+            'train.acc_mode' : 'full',
+            'train.loss_mode' : 'full'
+            }
+    elif config['data']['mode'] == 'classify':
+        constraint = {
+            'train.acc_fn' : 'L0',
+            'train.acc_mode' : 'class',
+            'data.perturb_mode' : 'last',
+            'data.perturb_value' : 0,
+            }
+        if config['data']['name'] == 'MNIST':
+            constraint.update({'data.perturb_num' : 10,
+                               'data.perturb_frac' : None
+                               })
+    return verify_items(config, constraint)
+
+
 ###################
 # Default configs #
 ###################
@@ -93,10 +129,15 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
 train_config = Config({
     'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
-    'lr': 0.01, #for FPT only
+    'lr': .1,
+    'lr_decay': 1.,
     'print_every': 10,
-    'loss_mode': 'full', # full, class
-    'epochs':10000
+    'loss_mode': 'full', #full, class
+    'loss_fn': 'mse', #mse, cos, bce
+    'acc_mode': 'class', #full, class
+    'acc_fn' : 'L0', #mae, L0
+    'epochs': 5000,
+    'device': 'cuda', #cuda, cpu
     })
 
 
@@ -105,9 +146,11 @@ net_config = Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
     'hidden_size': 50,
-    'beta': 1,
+    'normalize_weight': False,
+    'beta': 100,
     'tau': 1,
-    'input_mode': 'init', #init, cont, init+cont, clamp
+    'normalize_input': False,
+    'input_mode': 'cont', #init, cont, init+cont, clamp
     'dt': 0.05,
     'num_steps': 1000,
     'fp_mode': 'iter', #iter, del2
@@ -118,8 +161,17 @@ net_config = Config({
 # Datasets
 data_config = Config({
     'name': 'MNIST',
-    'subset': False, #positive integer or False: takes only first N items
-    'include_test': True
+    'include_test': False,
+    'normalize' : True,
+    'balanced': False,
+    'crop': False,
+    'downsample': False,
+    'subset': 50, #if int, takes only first N items
+    'mode': 'classify', #classify, complete
+    'perturb_frac': None,
+    'perturb_num': 10,
+    'perturb_mode': 'last',
+    'perturb_value': 0,
     })
 
 

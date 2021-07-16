@@ -8,7 +8,7 @@ from torch import nn
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
     def __init__(self, input_size, hidden_size, beta=None, tau=None, normalize_weight=False,
-                 normalize_input = False, input_mode='init', num_steps=None, dt=1,
+                 normalize_input=False, input_mode='init', num_steps=None, dt=1,
                  fp_thres=0.001, fp_mode='iter'):
 
         super().__init__()
@@ -28,13 +28,16 @@ class ModernHopfield(nn.Module):
         self.dt = dt
         self.num_steps = int(1/self.dt) if num_steps is None else int(num_steps)
 
-        assert fp_mode in ['iter'], f"Invalid fp mode: '{fp_mode}'" #TODO: 'del2'
+        assert fp_mode in ['iter'], f"Invalid fixed point mode: '{fp_mode}'" #TODO: 'del2'
         self.fp_mode = fp_mode
         self.fp_thres = fp_thres
 
-        assert input_mode in ['init', 'cont', 'init+cont'], f"Invalid input mode: '{input_mode}' "#TODO: 'clamp'
-        self.input_mode = input_mode
         self.normalize_input = normalize_input
+        self.input_mode = input_mode.lower()
+        assert self.input_mode in ['init', 'cont', 'init+cont', 'clamp'], f"Invalid input mode: '{input_mode}'"
+        if self.input_mode == 'clamp':
+            self.clamp_mask = torch.zeros(self.input_size, 1) #[M,1]
+            self.clamp_values = None
 
 
     def _maybe_normalize_weight(self):
@@ -49,27 +52,40 @@ class ModernHopfield(nn.Module):
         if self.normalize_input:
             input /= input.norm(dim=1, keepdim=True)
 
-        if 'init' in self.input_mode:
-            state = input #[B,M,1]
-        else:
-            state = torch.zeros_like(input)
-
-        if 'cont' not in self.input_mode:
+        if self.input_mode == 'init':
+            state = input
             input = torch.zeros_like(input)
+        elif self.input_mode == 'cont':
+            state = torch.zeros_like(input)
+        elif self.input_mode == 'init+cont':
+            state = input
+        elif self.input_mode == 'clamp':
+            state = torch.zeros_like(input)
+            input = torch.zeros_like(input)
+            self.clamp_values = input
+            self.clamp_mask = self.clamp_mask.expand_as(input) #[M,1]->[B,M,1] or no-op
 
         return state, input
 
 
+    def _maybe_clamp(self, state):
+        """ Runs at every step of the dynamics. Overwrites the clamped neurons, specified
+        by boolean clamp_mask"""
+        if self.input_mode == 'clamp':
+            state[self.clamp_mask] = self.clamp_values[self.clamp_mask]
+        return state
+
+
     def forward(self, input, debug=False):
         self._maybe_normalize_weight()
-        state, input = self._set_state_and_input(input)
+        state, input = self._set_state_and_input(input) #[B,M,1],[B,M,1]
 
         if debug:
             state_debug_history = []
         update_magnitude = float('inf')
         step = 0
         while update_magnitude > self.fp_thres and step < self.num_steps:
-            prev_state = state
+            prev_state = self._maybe_clamp(state)
             state = self.update_state(prev_state, input, debug=debug) #[B,M,1]
             step += 1
 
@@ -137,20 +153,20 @@ class ModernHopfield(nn.Module):
     @torch.no_grad()
     def energy(self, v, I=torch.tensor(0.)):
         #more general:
-        g = self._g(v)
-        h = self._h(g)
-        f = self._f(h)
-        Lv = self._Lv(v)
-        Lh = self._Lh(h)
+        # g = self._g(v)
+        # h = self._h(g)
+        # f = self._f(h)
+        # Lv = self._Lv(v)
+        # Lh = self._Lh(h)
 
-        vg = ((v-I).transpose(-2,-1) @ g).squeeze(-2)
-        hf = (h.transpose(-2,-1) @ f).squeeze(-2)
-        fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
-        E = (vg - Lv) + (hf - Lh) - fWg
+        # vg = ((v-I).transpose(-2,-1) @ g).squeeze(-2)
+        # hf = (h.transpose(-2,-1) @ f).squeeze(-2)
+        # fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
+        # E = (vg - Lv) + (hf - Lh) - fWg
 
-        # vv = ((v/2. - I).transpose(-2,-1) @ v).squeeze(-2)
-        # lse = torch.logsumexp(self.W@v, -2)
-        # E = vv - lse
+        vv = ((v/2. - I).transpose(-2,-1) @ v).squeeze(-2)
+        lse = torch.logsumexp(self.W@v, -2)
+        E = vv - lse
         return E
 
 

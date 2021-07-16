@@ -10,9 +10,6 @@ import configs as cfg
 if os.path.abspath('.').find('dtyulman') > -1:
     os.chdir('/home/dtyulman/projects/assoc_mem')
 
-#??? Train on one step --> probably won't extrapolate to many
-#??? Can we remove the "dead" units?
-
 #%%
 #get configs list
 baseconfig = cfg.Config({
@@ -21,19 +18,22 @@ baseconfig = cfg.Config({
               'lr': .1,
               'lr_decay': 1.,
               'print_every': 10,
-              'loss_mode': 'full', # full, class
-              'epochs': 500,
+              'loss_mode': 'full', #full, class
+              'loss_fn': 'mse', #mse, cos, bce
+              'acc_mode': 'class', #full, class
+              'acc_fn' : 'L0', #mae, L0
+              'epochs': 5000,
               'device': 'cuda', #cuda, cpu
               },
 
     'net': {'class': 'ModernHopfield',
             'input_size': None, #if None, infer from dataset
             'hidden_size': 50,
-            'normalize_weight': True,
-            'beta': 10,
+            'normalize_weight': False,
+            'beta': 100,
             'tau': 1,
-            'normalize_input': True,
-            'input_mode': 'init', #init, cont, init+cont, clamp
+            'normalize_input': False,
+            'input_mode': 'cont', #init, cont, init+cont, clamp
             'dt': 0.05,
             'num_steps': 1000,
             'fp_mode': 'iter', #iter, del2
@@ -41,34 +41,42 @@ baseconfig = cfg.Config({
             },
 
     'data': {'name': 'MNIST',
-             'mode': 'complete', #classify, complete
-             'perturb_frac': 0.5,
-             'perturb_mode': 'last',
-             'perturb_value': 0,
-             'subset': 50, #if int, takes only first N items
              'include_test': False,
+             'normalize' : True,
              'balanced': False,
              'crop': False,
-             'downsample': False
+             'downsample': False,
+             'subset': 50, #if int, takes only first N items
+
+             'mode': 'classify', #classify, complete
+             'perturb_frac': None,
+             'perturb_num': 10,
+             'perturb_mode': 'last',
+             'perturb_value': 0,
              }
-    }) #alternatively do cfg.get_config() and modify defaults
+    }) #alternatively can do cfg.get_config() and modify defaults, be careful with in-place ops
 
 # deltaconfigs = {'net.num_steps': [1, 1000],
 #                 'train.loss_mode': ['full', 'class'],
 #                 'net.input_mode': ['init', 'cont', 'init+cont'],
 #                 }
 deltaconfigs = {}
-
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
 
 #%%
-# savedir = utils.initialize_savedir(baseconfig)
+save = False
+if save:
+    savedir = utils.initialize_savedir(baseconfig)
+
 for config, label in zip(configs, labels):
+    cfg.verify_config(config)
 
     #data
     subset = config['data'].pop('subset')
     if config['data'].pop('name') == 'MNIST':
-        train_data, test_data = data.get_aa_mnist_data(**config['data'])
+        aa_kwargs = {k : config['data'][k] for k in ['mode', 'perturb_frac', 'perturb_num', 'perturb_mode', 'perturb_value']}
+        mnist_kwargs = {k : config['data'][k] for k in ['include_test','normalize', 'balanced', 'crop', 'downsample']}
+        train_data, test_data = data.get_aa_mnist_data(mnist_kwargs, aa_kwargs)
     if subset:
         train_data.dataset.data = train_data.dataset.data[:50]
         train_data.dataset.targets = train_data.dataset.targets[:50]
@@ -98,8 +106,9 @@ for config, label in zip(configs, labels):
     net.to(device)
     logger = trainer(epochs, label=label)
 
-    # joblib.dump(logger, os.path.join(savedir, f'log_{label}.pkl'))
-    # torch.save(net, os.path.join(savedir, f'net_{label}.pt'))
+    if save:
+        joblib.dump(logger, os.path.join(savedir, f'log_{label}.pkl'))
+        torch.save(net, os.path.join(savedir, f'net_{label}.pt'))
 
     print()
 

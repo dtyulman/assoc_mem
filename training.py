@@ -9,7 +9,8 @@ import torch.nn.functional as F
 
 class AssociativeTrain():
     def __init__(self, net, train_loader, test_loader=None, lr=0.001, lr_decay=1.,
-                 loss_mode='class', logger=None, print_every=100, sparse_logging_factor=10):#, **kwargs):
+                 loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0',
+                 logger=None, print_every=100, sparse_logging_factor=10):#, **kwargs):
         #kwargs ignores any extra values passed in via a Config
         self.name = None
         self.net = net
@@ -20,6 +21,24 @@ class AssociativeTrain():
 
         assert loss_mode in ['class', 'full'], f"Invalid loss mode: '{loss_mode}'"
         self.loss_mode = loss_mode
+        if loss_fn == 'mse':
+            self.loss_fn = nn.MSELoss()
+        elif loss_fn == 'cos':
+            raise NotImplementedError
+        elif loss_fn == 'bce':
+            raise nn.BCELoss()
+        else:
+            raise ValueError(f"Invalid loss function: '{loss_fn}'")
+
+        assert acc_mode in ['class', 'full'], f"Invalid accuracy mode: '{acc_mode}'"
+        self.acc_mode = acc_mode
+        if acc_fn == 'L0':
+            self.acc_fn = l0_acc
+        elif acc_fn == 'mae':
+            self.acc_fn = nn.L1Loss()
+        else:
+            raise ValueError(f"Invalid accuracy function: '{acc_fn}'")
+
 
         self.lr = lr
         self.lr_decay = lr_decay
@@ -38,21 +57,19 @@ class AssociativeTrain():
         raise NotImplementedError
 
 
-    def loss_fn(self, output, target):
+    def compute_loss(self, output, target):
         if self.loss_mode == 'class':
             output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
             target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
         loss = F.mse_loss(output, target, reduction='mean')
-        return loss
+        return self.loss_fn(output, target)
 
 
-    def acc_fn(self, output, target):
-        output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
-        target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
-        output_class = torch.argmax(output, dim=1)
-        target_class = torch.argmax(target, dim=1)
-        acc = (output_class == target_class).float().mean()
-        return acc
+    def compute_acc(self, output, target):
+        if self.acc_mode == 'class':
+            output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+            target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
+        return self.acc_fn(output, target)
 
 
     def __call__(self, epochs=10, label=''):
@@ -61,8 +78,11 @@ class AssociativeTrain():
 
         with Timer():
             for epoch in range(1, epochs+1):
-                for batch_num, (input, target) in enumerate(self.train_loader):
+                for batch_num, (input, target, perturb_mask) in enumerate(self.train_loader):
                     self.iteration += 1
+
+                    if self.net.input_mode == 'clamp':
+                        self.net.clamp_mask = ~perturb_mask
 
                     input, target = input.to(self.device), target.to(self.device)
                     output = self.net(input)
@@ -83,8 +103,8 @@ class AssociativeTrain():
                                     self.logger[param_name].append(param_value.detach().cpu().numpy())
 
                         #loss/acc
-                        loss = self.loss_fn(output, target) #TODO this is getting computed twice in SGD
-                        acc = self.acc_fn(output, target)
+                        loss = self.compute_loss(output, target) #TODO this is getting computed twice in SGD
+                        acc = self.compute_acc(output, target)
                         self.logger['iter'].append(self.iteration)
                         self.logger['train_loss'].append(loss.item())
                         self.logger['train_acc'].append(acc.item())
@@ -99,8 +119,8 @@ class AssociativeTrain():
                                 test_input, test_target = test_input.to(self.device), test_target.to(self.device)
 
                                 test_output = self.net(test_input)
-                                test_loss = self.loss_fn(test_output, test_target)
-                                test_acc = self.acc_fn(test_output, test_target)
+                                test_loss = self.compute_loss(test_output, test_target)
+                                test_acc = self.compute_acc(test_output, test_target)
 
                             self.logger['test_loss'].append(test_loss.item())
                             self.logger['test_acc'].append(test_acc.item())
@@ -122,7 +142,7 @@ class SGDTrain(AssociativeTrain):
 
 
     def _update_parameters(self, output, target):
-        loss = self.loss_fn(output, target)
+        loss = self.compute_loss(output, target)
         self.optimizer.zero_grad()
         loss.backward(retain_graph=True)
         self.optimizer.step()
@@ -268,6 +288,14 @@ class Logger():
 
     def write(self, key, value, iteration):
         pass
+
+
+def l0_acc(output, target):
+    output_class = torch.argmax(output, dim=1)
+    target_class = torch.argmax(target, dim=1)
+    return (output_class == target_class).float().mean()
+
+
 
 
 ############
