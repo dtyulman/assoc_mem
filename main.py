@@ -1,4 +1,4 @@
-import os, importlib
+import os
 
 #third-party
 import torch, joblib
@@ -20,8 +20,8 @@ baseconfig = cfg.Config({
               'print_every': 10,
               'loss_mode': 'full', #full, class
               'loss_fn': 'mse', #mse, cos, bce
-              'acc_mode': 'class', #full, class
-              'acc_fn' : 'L0', #mae, L0
+              'acc_mode': 'full', #full, class
+              'acc_fn' : 'mae', #mae, L0
               'epochs': 5000,
               'device': 'cuda', #cuda, cpu
               },
@@ -29,11 +29,11 @@ baseconfig = cfg.Config({
     'net': {'class': 'ModernHopfield',
             'input_size': None, #if None, infer from dataset
             'hidden_size': 50,
-            'normalize_weight': False,
+            'normalize_weight': True,
             'beta': 100,
             'tau': 1,
             'normalize_input': False,
-            'input_mode': 'cont', #init, cont, init+cont, clamp
+            'input_mode': 'clamp', #init, cont, init+cont, clamp
             'dt': 0.05,
             'num_steps': 1000,
             'fp_mode': 'iter', #iter, del2
@@ -48,9 +48,15 @@ baseconfig = cfg.Config({
              'downsample': False,
              'subset': 50, #if int, takes only first N items
 
-             'mode': 'classify', #classify, complete
-             'perturb_frac': None,
-             'perturb_num': 10,
+             # 'mode': 'classify', #classify, complete
+             # 'perturb_frac': None,
+             # 'perturb_num': 10,
+             # 'perturb_mode': 'last',
+             # 'perturb_value': 0,
+
+             'mode': 'complete', #classify, complete
+             'perturb_frac': 0.5,
+             'perturb_num': None,
              'perturb_mode': 'last',
              'perturb_value': 0,
              }
@@ -156,7 +162,7 @@ fig.tight_layout()
 
 #%%
 n_per_class = 5
-debug_input, debug_target = data.get_aa_debug_batch(train_data)
+debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data)
 plots.plot_data_batch(debug_input, debug_target)
 
 state_debug_history = net(debug_input, debug=True)
@@ -164,7 +170,9 @@ plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True
 
 #%%
 n_per_class = 1
-debug_input, debug_target = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
+debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
+if net.input_mode == 'clamp':
+    net.clamp_mask = ~debug_perturb_mask
 
 num_steps_train = net.num_steps
 net.num_steps = 200#int(100/net.dt)

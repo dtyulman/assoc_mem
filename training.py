@@ -34,11 +34,10 @@ class AssociativeTrain():
         self.acc_mode = acc_mode
         if acc_fn == 'L0':
             self.acc_fn = l0_acc
-        elif acc_fn == 'mae':
-            self.acc_fn = nn.L1Loss()
+        elif acc_fn == 'L1' or acc_fn == 'mae':
+            self.acc_fn = l1_acc
         else:
             raise ValueError(f"Invalid accuracy function: '{acc_fn}'")
-
 
         self.lr = lr
         self.lr_decay = lr_decay
@@ -61,7 +60,6 @@ class AssociativeTrain():
         if self.loss_mode == 'class':
             output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
             target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
-        loss = F.mse_loss(output, target, reduction='mean')
         return self.loss_fn(output, target)
 
 
@@ -81,12 +79,9 @@ class AssociativeTrain():
                 for batch_num, (input, target, perturb_mask) in enumerate(self.train_loader):
                     self.iteration += 1
 
-                    if self.net.input_mode == 'clamp':
-                        self.net.clamp_mask = ~perturb_mask
-
                     input, target = input.to(self.device), target.to(self.device)
-                    output = self.net(input)
-
+                    #TODO:inverting perturb_mask even when net is not clamping maybe inefficient
+                    output = self.net(input, clamp_mask=~perturb_mask)
                     self._update_parameters(output, target)
 
                     #logging
@@ -295,7 +290,8 @@ def l0_acc(output, target):
     target_class = torch.argmax(target, dim=1)
     return (output_class == target_class).float().mean()
 
-
+def l1_acc(output, target):
+    return 1 - F.l1_loss(output, target)
 
 
 ############

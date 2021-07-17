@@ -84,13 +84,10 @@ def get_aa_mnist_data(mnist_kwargs, aa_kwargs):
 
 
 def get_aa_debug_batch(train_data, select_classes='all', n_per_class=None):
-    #train_data is an AssociativeDataset object
-    debug_data = deepcopy(train_data)
+    debug_data = deepcopy(train_data) #train_data is an AssociativeDataset object
     debug_data.dataset = filter_classes(debug_data.dataset, select_classes=select_classes,
                                         n_per_class=n_per_class)
-
-    debug_input, debug_target = next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
-    return debug_input, debug_target
+    return next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
 
 
 

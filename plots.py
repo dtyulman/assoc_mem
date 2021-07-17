@@ -56,10 +56,8 @@ def plot_data_batch(inputs, targets):
 def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=True, ax=None):
     if ax is None:
         fig, ax = plt.subplots()
-        manual_cbar = False
     else:
         fig = ax.get_figure()
-        manual_cbar = True
 
     try:
         W = W.cpu().detach().numpy()
@@ -78,7 +76,7 @@ def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=Tr
 
     v = np.nanmax(np.abs(grid)) if not v else v
     im = ax.imshow(grid, cmap='RdBu_r', vmin=-v, vmax=v)
-    if manual_cbar:
+    if add_cbar:
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax)
@@ -263,16 +261,14 @@ def rows_to_images(M, vpix=None, hpix=None, drop_last=0, pad_nan=True):
 def images_to_grid(img_list, rows=None, cols=None, vpad=0, hpad=0):
     """Convert a list of matrices (e.g. images) to a <rows>-by-<cols> grid of images (i.e. one
     large matrix). Optionally pad each matrix below/left with vpad/hpad rows/cols of NaNs"""
-    rows, cols = length_to_rows_cols(len(img_list), rows, cols)
-
     vpix = img_list[0].shape[0] + vpad
     hpix = img_list[0].shape[1] + hpad
+    rows, cols = length_to_rows_cols(len(img_list), rows, cols)
     grid = np.full((rows*vpix, cols*hpix), fill_value=float('nan'))
     for i,img in enumerate(img_list):
         r = i//cols
         c = i%cols
         grid[r*vpix:(r+1)*vpix-vpad, c*hpix:(c+1)*hpix-hpad] = img
-
     return grid
 
 
@@ -284,6 +280,5 @@ def length_to_rows_cols(length, rows=None, cols=None):
         rows = int(np.ceil(length/cols))
     elif rows is not None and cols is None:
         cols = int(np.ceil(length/rows))
-
     assert rows*cols >= length #sanity
     return rows, cols

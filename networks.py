@@ -1,4 +1,5 @@
 import warnings
+from itertools import chain, combinations
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +17,7 @@ class ModernHopfield(nn.Module):
         self.hidden_size = hidden_size # N
 
         self._W = nn.Parameter(torch.zeros(self.hidden_size, self.input_size)) #[N,M]
-        nn.init.kaiming_normal_(self._W)
+        nn.init.xavier_normal_(self._W)
         assert normalize_weight in [True, False]
         self.normalize_weight = normalize_weight
         self._maybe_normalize_weight()
@@ -34,10 +35,10 @@ class ModernHopfield(nn.Module):
 
         self.normalize_input = normalize_input
         self.input_mode = input_mode.lower()
-        assert self.input_mode in ['init', 'cont', 'init+cont', 'clamp'], f"Invalid input mode: '{input_mode}'"
-        if self.input_mode == 'clamp':
-            self.clamp_mask = torch.zeros(self.input_size, 1) #[M,1]
-            self.clamp_values = None
+        input_modes = ['init', 'cont', 'clamp'] #valid modes are all combinations of these
+        valid_input_modes = chain.from_iterable(combinations(input_modes, r) for r in range(1,len(input_modes)+1))
+        valid_input_modes = ['+'.join(m) for m in valid_input_modes]
+        assert self.input_mode in valid_input_modes, f"Invalid input mode: '{input_mode}'"
 
 
     def _maybe_normalize_weight(self):
@@ -48,45 +49,43 @@ class ModernHopfield(nn.Module):
             self.W = self._W
 
 
-    def _set_state_and_input(self, input):
+    def _initialize_input(self, input, clamp_mask):
         if self.normalize_input:
             input /= input.norm(dim=1, keepdim=True)
 
-        if self.input_mode == 'init':
+        state = torch.zeros_like(input)
+        external_current = torch.zeros_like(input)
+        clamp_values = None
+
+        if 'init' in self.input_mode:
             state = input
-            input = torch.zeros_like(input)
-        elif self.input_mode == 'cont':
-            state = torch.zeros_like(input)
-        elif self.input_mode == 'init+cont':
-            state = input
-        elif self.input_mode == 'clamp':
-            state = torch.zeros_like(input)
-            input = torch.zeros_like(input)
-            self.clamp_values = input
-            self.clamp_mask = self.clamp_mask.expand_as(input) #[M,1]->[B,M,1] or no-op
+        if 'cont' in self.input_mode:
+            external_current = input
+        if 'clamp' in self.input_mode:
+            clamp_values = input[clamp_mask]
 
-        return state, input
+        return state, external_current, clamp_values
 
 
-    def _maybe_clamp(self, state):
-        """ Runs at every step of the dynamics. Overwrites the clamped neurons, specified
+    def _maybe_clamp(self, state, clamp_mask, clamp_values):
+        """Runs at every step of the dynamics. Overwrites the clamped neurons, specified
         by boolean clamp_mask"""
         if self.input_mode == 'clamp':
-            state[self.clamp_mask] = self.clamp_values[self.clamp_mask]
+            state[clamp_mask] = clamp_values
         return state
 
 
-    def forward(self, input, debug=False):
+    def forward(self, input, clamp_mask=None, debug=False):
         self._maybe_normalize_weight()
-        state, input = self._set_state_and_input(input) #[B,M,1],[B,M,1]
+        state, external_current, clamp_values = self._initialize_input(input) #[B,M,1],[B,M,1]
 
         if debug:
             state_debug_history = []
         update_magnitude = float('inf')
         step = 0
         while update_magnitude > self.fp_thres and step < self.num_steps:
-            prev_state = self._maybe_clamp(state)
-            state = self.update_state(prev_state, input, debug=debug) #[B,M,1]
+            prev_state = self._maybe_clamp(state, clamp_mask, clamp_values)
+            state = self.update_state(prev_state, external_current, debug=debug) #[B,M,1]
             step += 1
 
             if debug: #state is actually state_debug
