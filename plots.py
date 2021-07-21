@@ -8,34 +8,30 @@ MNIST_VPIX = 28
 MNIST_HPIX = 28
 MNIST_CLASSES = 10
 
-def plot_loss_acc(loss, acc, test_loss=None, test_acc=None, iters=None,
-                  title=None, ax=None):
+
+def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
     if ax is None:
         fig, ax = plt.subplots(2,1, sharex=True)
 
-    if iters is None:
-        iters = list(range(len(loss)))
-
-    ax[0].plot(iters, loss, label='Train')
-    if test_loss is not None:
-        ax[0].plot(iters, test_loss, label='Test')
-        ax[0].legend()
+    logger.plot_key('train/loss', label='Train', ax=ax[0])
+    logger.plot_key('train/acc', label='Train', ax=ax[1])
     ax[0].set_ylabel('Loss')
-
-    ax[1].plot(iters, acc)
-    if test_acc is not None:
-        ax[1].plot(iters, test_acc)
     ax[1].set_xlabel('Iterations')
     ax[1].set_ylabel('Accuracy')
-
     if title is not None:
         ax[0].set_title(title)
 
+    if plot_test:
+        if 'test/loss' in logger:
+            logger.plot_key('test/loss', label='Test', ax=ax[0])
+            ax[0].legend()
+        if 'test/acc' in logger:
+            logger.plot_key('test/acc', label='Test', ax=ax[1])
     return ax
 
 
-def plot_data_batch(inputs, targets):
-    fig, axs = plt.subplots(1,2)
+def plot_data_batch(inputs, targets, ax=None):
+    fig, axs = prep_axes(ax,1,2)
 
     inputs_list = rows_to_images(inputs.squeeze(), pad_nan=True)
     targets_list = rows_to_images(targets.squeeze(), pad_nan=True)
@@ -54,10 +50,7 @@ def plot_data_batch(inputs, targets):
 
 
 def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=True, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots()
-    else:
-        fig = ax.get_figure()
+    fig, ax = prep_axes(ax)
 
     try:
         W = W.cpu().detach().numpy()
@@ -86,8 +79,7 @@ def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=Tr
 
 
 def plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots(2,1)
+    fig, ax = prep_axes(ax,2,1)
 
     key = 'f' if apply_nonlin else 'h'
     h = state_debug_history[-1][key].detach()
@@ -148,31 +140,33 @@ def plot_state_update_magnitude_dynamics(state_debug_history,
     return ax
 
 
-def plot_state_dynamics(state_debug_history, num_steps_plotted=20, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots()
-    else:
-        fig = ax.get_figure()
+def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None, ax=None):
+    fig, ax = prep_axes(ax)
 
     state_trajectory = get_trajectory_by_key(state_debug_history, 'state').numpy().squeeze(-1) #[T,B,M]
+    if targets is not None: #plot error instead of state
+        cbar_label = 'Error (v-t)'
+        state_trajectory = state_trajectory - targets.squeeze(-1).unsqueeze(0).numpy() #[T,B,M]-[B,M]
+    else:
+        cbar_label = 'State'
 
     T,B,M = state_trajectory.shape
     num_steps_plotted = min(num_steps_plotted, T)
     steps = np.linspace(0, T-1, num_steps_plotted, dtype=int)
-    state_trajectory = state_trajectory[steps] #[num_steps_plotted,B,M]
+    state_trajectory = state_trajectory[steps] #[T,B,M]->[num_steps_plotted,B,M]
 
     state_trajectory_images = []
     for b in range(B):
-        individual_state_trajectory = state_trajectory[:,b].squeeze() #[num_steps_plotted,M]
-        state_trajectory_images += rows_to_images(individual_state_trajectory,
-                                                  MNIST_HPIX, MNIST_VPIX, MNIST_CLASSES)
+        individual_state_trajectory = state_trajectory[:,b] #[num_steps_plotted,M]
+        state_trajectory_images += rows_to_images(individual_state_trajectory, vpix=MNIST_VPIX,
+                                                  hpix=MNIST_VPIX)#, drop_last=MNIST_CLASSES)
     state_trajectory_images = images_to_grid(state_trajectory_images,
                                              rows=B, cols=num_steps_plotted, vpad=1)
 
     v = np.nanmax(np.abs(state_trajectory_images))
     im = ax.imshow(state_trajectory_images, cmap='RdBu_r', vmin=-v, vmax=v)
-    fig.colorbar(im, label='State value')
-    # ax.axis('off')
+    fig.colorbar(im, label=cbar_label)
+
     xticks = np.arange(MNIST_HPIX//2, MNIST_HPIX*num_steps_plotted+MNIST_HPIX//2, MNIST_HPIX)
     ax.set_xticks(xticks)
     ax.set_xticklabels(steps)
@@ -190,7 +184,7 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, ax=None):
 
 def plot_energy_dynamics(state_debug_history, net,
                          n_per_class=1, num_steps_train=None, ax=None):
-    state_trajectory = get_trajectory_by_key(state_debug_history, 'state')
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'state') #[T,B,M]
     input = get_trajectory_by_key(state_debug_history, 'I')
     energy = net.energy(state_trajectory, input).squeeze(-1)
 
@@ -232,6 +226,11 @@ def plot_hidden_dynamics(state_debug_history, apply_nonlin=True, transformation=
 
     ax.set_ylabel('{}($\\vec{{f}}$)'.format(transformation))
     return ax
+
+
+def plot_error_dynamics(state_debug_history, targets, ax=None):
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'state') #[T,B,M]
+    e
 
 
 
@@ -282,3 +281,13 @@ def length_to_rows_cols(length, rows=None, cols=None):
         cols = int(np.ceil(length/rows))
     assert rows*cols >= length #sanity
     return rows, cols
+
+
+def prep_axes(ax=None, nrows=1, ncols=1, **kwargs):
+    if ax is None:
+        fig, ax = plt.subplots(nrows, ncols, **kwargs)
+    else:
+        if ncols>1 or nrows>1:
+            assert len(ax.flatten()) == nrows*ncols
+        fig = ax.get_figure()
+    return fig, ax

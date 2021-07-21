@@ -19,7 +19,7 @@ class AssociativeDataset(Dataset):
         elif mode == 'classify':
             self.target_size = dataset[0][1].numel()
 
-        assert (perturb_frac==None) != (perturb_num==None), \
+        assert (perturb_frac is None) != (perturb_num is None), \
             "Must specify either the fraction xor the number of entries to perturb"
         self.perturb_frac, self.perturb_num = perturb_frac, perturb_num
         if perturb_frac is None:

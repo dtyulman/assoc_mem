@@ -1,26 +1,43 @@
-from collections import defaultdict
-import warnings
-import time
+import warnings, time
 
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
 import torch.nn.functional as F
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
 class AssociativeTrain():
     def __init__(self, net, train_loader, test_loader=None, lr=0.001, lr_decay=1.,
                  loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0',
-                 logger=None, print_every=100, sparse_logging_factor=10):#, **kwargs):
+                 logger=None, logdir=None, print_every=100, sparse_logging_factor=10):#, **kwargs):
         #kwargs ignores any extra values passed in via a Config
         self.name = None
         self.net = net
+        self.set_device()
 
         self.train_loader = train_loader
         self.test_loader = test_loader
         self.n_class_units = train_loader.dataset.target_size #Mc
 
+        self._set_loss_mode(loss_mode, loss_fn)
+        self._set_acc_mode(acc_mode, acc_fn)
+
+        self.lr = lr
+        self.lr_decay = lr_decay
+
+        self.print_every = print_every
+        self.sparse_logging_factor = sparse_logging_factor
+
+        if logger is None:
+            self.logger = Logger(logdir)
+        else:
+            self.logger = logger
+
+    def _set_loss_mode(self, loss_mode, loss_fn):
         assert loss_mode in ['class', 'full'], f"Invalid loss mode: '{loss_mode}'"
         self.loss_mode = loss_mode
+
         if loss_fn == 'mse':
             self.loss_fn = nn.MSELoss()
         elif loss_fn == 'cos':
@@ -30,8 +47,11 @@ class AssociativeTrain():
         else:
             raise ValueError(f"Invalid loss function: '{loss_fn}'")
 
+
+    def _set_acc_mode(self, acc_mode, acc_fn):
         assert acc_mode in ['class', 'full'], f"Invalid accuracy mode: '{acc_mode}'"
         self.acc_mode = acc_mode
+
         if acc_fn == 'L0':
             self.acc_fn = l0_acc
         elif acc_fn == 'L1' or acc_fn == 'mae':
@@ -39,17 +59,35 @@ class AssociativeTrain():
         else:
             raise ValueError(f"Invalid accuracy function: '{acc_fn}'")
 
-        self.lr = lr
-        self.lr_decay = lr_decay
 
-        self.print_every = print_every
-        self.sparse_logging_factor = sparse_logging_factor
-        if logger is None:
-            self.logger = defaultdict(list)
-            self.iteration = 0
-        else:
-            self.logger = logger
-            self.iteration = logger['iter'][-1]
+    def __call__(self, epochs=10, label=''):
+        print(f'Training: {self.name}' + (f', {label}' if label else ''))
+        self.set_device()
+
+        with Timer():
+            if self.logger.iteration == 0:
+                self.write_log()
+            for _ in range(epochs):
+                self.logger.epoch += 1
+                for batch in self.train_loader:
+                    self.logger.iteration += 1
+
+                    input, target, clamp_mask = self._prep_data(*batch)
+                    output = self.net(input, clamp_mask)
+                    self._update_parameters(output, target)
+
+                    self.write_log(output=output, target=target)
+
+                if self.lr_decay:
+                    self.lr *= self.lr_decay
+
+        return self.logger
+
+
+    def _prep_data(self, input, target, perturb_mask):
+        input, target = input.to(self.device), target.to(self.device)
+        clamp_mask = ~perturb_mask if ('clamp' in self.net.input_mode) else None
+        return input, target, clamp_mask
 
 
     def _update_parameters(self, output, target):
@@ -70,61 +108,62 @@ class AssociativeTrain():
         return self.acc_fn(output, target)
 
 
-    def __call__(self, epochs=10, label=''):
-        print(f'Training: {self.name}' + (f', {label}' if label else ''))
-        self.device = next(self.net.parameters()).device  # assume all model params on same device
+    def set_device(self):
+        self.device = next(self.net.parameters()).device  #assume all model params on same device
 
-        with Timer():
-            for epoch in range(1, epochs+1):
-                for batch_num, (input, target, perturb_mask) in enumerate(self.train_loader):
-                    self.iteration += 1
 
-                    input, target = input.to(self.device), target.to(self.device)
-                    #TODO:inverting perturb_mask even when net is not clamping maybe inefficient
-                    output = self.net(input, clamp_mask=~perturb_mask)
-                    self._update_parameters(output, target)
+    @torch.no_grad()
+    def write_log(self, input=None, target=None, clamp_mask=None, output=None,
+                  train_loss=None, train_acc=None):
 
-                    #logging
-                    if self.iteration % self.print_every == 0:
-                        #params / param stats
-                        for param_name, param_value in self.net.named_parameters():
-                            if param_value.numel() == 1:
-                                self.logger[param_name].append(param_value.item())
-                            else:
-                                self.logger[param_name+'/mean'].append(param_value.mean().item())
-                                self.logger[param_name+'/std'].append(param_value.std().item())
-                                if self.iteration % (self.sparse_logging_factor*self.print_every) == 0:
-                                    #log full parameter more sparsely to save space
-                                    self.logger[param_name].append(param_value.detach().cpu().numpy())
+        if self.logger.iteration % self.print_every == 0:
+            #training loss/acc
+            if train_loss is None or train_acc is None:
+                assert (input is not None and target is not None and output is     None) or \
+                       (input is     None and target is not None and output is not None) or \
+                       (input is     None and target is     None and output is     None), \
+                        'Provide either input+target, output+target, xor none of them'
+                if output is None:
+                    if input is None:
+                        batch = next(iter(self.train_loader))
+                        input, target, clamp_mask = self._prep_data(*batch)
+                    output = self.net(input, clamp_mask)
 
-                        #loss/acc
-                        loss = self.compute_loss(output, target) #TODO this is getting computed twice in SGD
-                        acc = self.compute_acc(output, target)
-                        self.logger['iter'].append(self.iteration)
-                        self.logger['train_loss'].append(loss.item())
-                        self.logger['train_acc'].append(acc.item())
+                if train_loss is None:
+                    train_loss = self.compute_loss(output, target)
+                if train_acc is None:
+                    train_acc = self.compute_acc(output, target)
 
-                        log_str = 'ep={:3d} it={:5d} loss={:.5f} acc={:.3f}' \
-                                     .format(epoch, self.iteration, loss, acc)
+            self.logger('train/loss', train_loss)
+            self.logger('train/acc', train_acc)
+            log_str = 'ep={:3d} it={:5d} loss={:.5f} acc={:.3f}' \
+                         .format(self.logger.epoch, self.logger.iteration, train_loss, train_acc)
 
-                        #test loss/acc if applicable
-                        if self.test_loader is not None:
-                            with torch.no_grad():
-                                test_input, test_target = next(iter(self.test_loader))
-                                test_input, test_target = test_input.to(self.device), test_target.to(self.device)
+            #test loss/acc if applicable
+            if self.test_loader is not None:
+                test_batch = next(iter(self.test_loader))
+                test_input, test_target, test_clamp_mask = self._prep_data(*test_batch)
 
-                                test_output = self.net(test_input)
-                                test_loss = self.compute_loss(test_output, test_target)
-                                test_acc = self.compute_acc(test_output, test_target)
+                test_output = self.net(test_input)
+                test_loss = self.compute_loss(test_output, test_target)
+                test_acc = self.compute_acc(test_output, test_target)
 
-                            self.logger['test_loss'].append(test_loss.item())
-                            self.logger['test_acc'].append(test_acc.item())
-                            log_str += ' test_loss={:.5f} test_acc={:.3f}'.format(test_loss, test_acc)
-                        print(log_str)
+                self.logger('test/loss', test_loss)
+                self.logger['test_acc'].append(test_acc.item())
+                log_str += ' test_loss={:.5f} test_acc={:.3f}'.format(test_loss, test_acc)
 
-                if self.lr_decay:
-                    self.lr *= self.lr_decay
-        return dict(self.logger)
+            #params / param stats
+            for param_name, param_value in self.net.named_parameters():
+                if param_value.numel() == 1:
+                    self.logger(f'params/{param_name}', param_value)
+                else:
+                    self.logger(f'params/{param_name}_mean', param_value.mean())
+                    self.logger(f'params/{param_name}_std', param_value.std())
+
+                    if self.logger.iteration % (self.sparse_logging_factor*self.print_every) == 0:
+                        #log full parameter more sparsely to save space
+                        self.logger.add_image('W', self.net._W, global_step=self.logger.iteration, dataformats='HW')
+            print(log_str)
 
 
 
@@ -139,12 +178,9 @@ class SGDTrain(AssociativeTrain):
     def _update_parameters(self, output, target):
         loss = self.compute_loss(output, target)
         self.optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward()
         self.optimizer.step()
-
-        if self.iteration % self.print_every == 0:
-            grad_norm = torch.cat([p.reshape(-1,1) for p in self.net.parameters() if p.requires_grad]).norm().item()
-            self.logger['grad_norm'].append(grad_norm)
+        return loss
 
 
 
@@ -154,31 +190,21 @@ class FPTrain(AssociativeTrain):
         #modified default lr
         super().__init__(net, train_loader, test_loader, lr=lr, **kwargs)
         self.name = 'FPT'
+        assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
+        self.verify_grad = False #for sanity-checking dLdW against non-batched version
 
 
+    @torch.no_grad()
     def __call__(self, *args, **kwargs):
-        with torch.no_grad():
-            return super().__call__(*args, **kwargs)
+        return super().__call__(*args, **kwargs)
 
 
     def _update_parameters(self, output, target):
-        # dvdW = compute_dvdW(output, net.W, net.beta) #[B,(N,M),M,1]
+        dLdW = self.compute_dLdW(output, target) #TODO: put into W.grad?
 
-        # #only consider the neurons reporting the class
-        # output_class = output[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
-        # target_class = target[:, -num_classes:, :] #[B,M,1]->[B,Mc,1]
-        # dvdW_class = dvdW[:,:,:, -num_classes:, :] #[B,(N,M),M,1] --> #[B,(N,M),Mc,1]
-
-        # #assume MSE loss
-        # error_class = (output_class - target_class).unsqueeze(1).unsqueeze(1) #[B,Mc,1]-->[B,1,1,Mc,1]
-        # dLdW1 = (error_class*dvdW_class).squeeze().sum(dim=0).sum(dim=-1) #[B,(N,M),Mc,1]-->[N,M]
-        # del dvdW, output_class, target_class, dvdW_class, error_class, dLdW
-
-        dLdW = self._dLdW(output, target) #TODO: put into W.grad?
-
-        # dLdW_nb = compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0),
-        #                               net.W, net.beta)
-        # assert (dLdW-dLdW_nb).abs().mean() < 1e-10
+        if self.verify_grad:
+            dLdW_nb = self.compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0))
+            assert (dLdW-dLdW_nb).abs().mean() < 1e-10, 'Error in dLdW calculation!'
 
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
@@ -186,21 +212,14 @@ class FPTrain(AssociativeTrain):
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
             dLd_W = dLdW / Z - self.net._W *(S / Z**3)
             self.net._W -= self.lr * dLd_W
-        else: #W==_W, so dLd_W[u,i]==dLdW[u,i]
-            self.net._W -= self.lr * dLdW
+        else:
+            dLd_W = dLdW
 
-        if self.iteration % self.print_every == 0:
-            grad_norm = dLdW.norm().item()
-            self.logger['grad_norm'].append(grad_norm)
-
-        #in principle should not need this since it only releases memory to *outside*
-        #programs but in practice helps with OOM (perhaps due to PyTorch mem leaks?)
-        del dLdW
-        torch.cuda.empty_cache()
+        self.net._W -= self.lr * dLdW
+        self.logger('train/grad_norm', dLd_W.norm())
 
 
-
-    def _dLdW(self, v, t):
+    def compute_dLdW(self, v, t):
         """
         Assumes:
             Modern Hopfield dynamics, tau*dv/dt = -v + W*softmax(W^T*v)
@@ -240,7 +259,7 @@ class FPTrain(AssociativeTrain):
         return dLdW.mean(dim=0)
 
 
-    def _dLdW_nobatch(self, v, t): #for debugging
+    def compute_dLdW_nobatch(self, v, t): #for debugging
         assert(len(v.shape) == 2), 'output v cannot be batched'
         assert(len(t.shape) == 2), 'target t cannot be batched'
         N,M = self.net.W.shape
@@ -274,21 +293,76 @@ class Timer():
         print(elapsed_str)
 
 
-class Logger():
-    #TODO: tensorboard
-    def __init__(self, folder=None):
-        raise NotImplementedError()
-        self.folder = folder
-        self.log = defaultdict(list)
 
-    def write(self, key, value, iteration):
-        pass
+class Logger(torch.utils.tensorboard.SummaryWriter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.event_acc = EventAccumulator(self.get_logdir())
+
+        self.epoch = 0 #number of times through the entire dataset
+        self.iteration = 0 #number of batches, depends on batch size
+
+
+    def __getitem__(self, key):
+        self.event_acc.Reload() #TODO: necessary/expensive every time? can add "is_stale" flag
+        try:
+            walltimes, steps, vals = zip(*self.event_acc.Scalars(key))
+        except: #if used "new style" in SummaryWriter.add_scalar()
+           walltimes, steps, vals = zip(*self.event_acc.Tensors(key))
+           vals = [v.float_val[0] for v in vals]
+        return steps, vals
+
+
+    def __call__(self, *args, **kwargs):
+        self.add_scalar(*args, **kwargs)
+
+
+    def __contains__(self, key):
+        for tag, keylist in self.event_acc.Tags().items():
+            try:
+                if key in keylist:
+                    return True
+            except:
+                #not every keylist is actually a list, ignore it if it's not
+                pass
+        return False
+
+
+    def plot_key(self, key, ax=None, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots()
+        ax.plot(*self[key], **kwargs)
+        return ax
+
+
+    def to_dict(self):
+        """Returns a dictionary in the format {key : (steps_list values_list)} for every scalar key
+        stored by the logger. Excludes images, histograms, etc."""
+        log_dict = {}
+        scalar_keys = self.event_acc.Tags()['scalars'] + self.event_acc.Tags()['tensors']
+        for key in scalar_keys:
+            log_dict[key] = self[key]
+        return log_dict
+
+
+    def add_scalar(self, tag, scalar_value, global_step=None):
+        try:
+            scalar_value = scalar_value.item()
+        except AttributeError:
+            pass
+
+        step = self.iteration if global_step is None else global_step
+        super().add_scalar(tag, scalar_value, global_step=step, walltime=None, new_style=True)
+
+
+
 
 
 def l0_acc(output, target):
     output_class = torch.argmax(output, dim=1)
     target_class = torch.argmax(target, dim=1)
     return (output_class == target_class).float().mean()
+
 
 def l1_acc(output, target):
     return 1 - F.l1_loss(output, target)

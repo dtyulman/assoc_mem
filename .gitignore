@@ -2,6 +2,7 @@
 data/
 misc/
 results/
+runs/
 .spyproject/
 *.png
 *.pt

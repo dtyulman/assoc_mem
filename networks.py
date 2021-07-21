@@ -77,7 +77,7 @@ class ModernHopfield(nn.Module):
 
     def forward(self, input, clamp_mask=None, debug=False):
         self._maybe_normalize_weight()
-        state, external_current, clamp_values = self._initialize_input(input) #[B,M,1],[B,M,1]
+        state, external_current, clamp_values = self._initialize_input(input, clamp_mask) #[B,M,1],[B,M,1]
 
         if debug:
             state_debug_history = []

@@ -22,7 +22,7 @@ baseconfig = cfg.Config({
               'loss_fn': 'mse', #mse, cos, bce
               'acc_mode': 'full', #full, class
               'acc_fn' : 'mae', #mae, L0
-              'epochs': 5000,
+              'epochs': 500,
               'device': 'cuda', #cuda, cpu
               },
 
@@ -33,7 +33,7 @@ baseconfig = cfg.Config({
             'beta': 100,
             'tau': 1,
             'normalize_input': False,
-            'input_mode': 'clamp', #init, cont, init+cont, clamp
+            'input_mode': 'clamp', #init, cont, clamp (combine w/ '+')
             'dt': 0.05,
             'num_steps': 1000,
             'fp_mode': 'iter', #iter, del2
@@ -49,7 +49,7 @@ baseconfig = cfg.Config({
              'subset': 50, #if int, takes only first N items
 
              # 'mode': 'classify', #classify, complete
-             # 'perturb_frac': None,
+             # 'perturb_frac': None, #perturb_frac or perturb_num must be None
              # 'perturb_num': 10,
              # 'perturb_mode': 'last',
              # 'perturb_value': 0,
@@ -70,12 +70,11 @@ deltaconfigs = {}
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
 
 #%%
-save = False
-if save:
-    savedir = utils.initialize_savedir(baseconfig)
+saveroot = utils.initialize_savedir(baseconfig)
 
 for config, label in zip(configs, labels):
     cfg.verify_config(config)
+    savedir = os.path.join(saveroot, label)
 
     #data
     subset = config['data'].pop('subset')
@@ -106,15 +105,14 @@ for config, label in zip(configs, labels):
         else:
             test_loader = None
     TrainerClass = getattr(training, config['train'].pop('class'))
-    trainer = TrainerClass(net, train_loader, test_loader, **config['train'])
+    trainer = TrainerClass(net, train_loader, test_loader, logdir=savedir, **config['train'])
 
     #go
     net.to(device)
     logger = trainer(epochs, label=label)
 
-    if save:
-        joblib.dump(logger, os.path.join(savedir, f'log_{label}.pkl'))
-        torch.save(net, os.path.join(savedir, f'net_{label}.pt'))
+    # joblib.dump(logger, os.path.join(savedir, 'log.pkl'))
+    torch.save(net, os.path.join(savedir, 'net.pt'))
 
     print()
 
@@ -141,7 +139,7 @@ title = '{net}:{hid} W:{norm} $\\beta$={bet} $\\tau$={tau} in:{inp}\n' \
 
 net.to('cpu')
 #%%
-plots.plot_loss_acc(logger['train_loss'], logger['train_acc'], iters=logger['iter'])
+plots.plot_loss_acc(logger)
 
 #%%
 plot_class=True
@@ -185,7 +183,8 @@ ax = ax.flatten()
 plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train, ax=ax[0])
 plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[1])
 plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps_train, ax=ax[2])
-plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
+# plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
+plots.plot_error_dynamics(state_debug_history, debug_target)
 
 [a.set_xlabel('') for a in ax[0:2]]
 [a.legend_.remove() for a in ax[0:-1]]
@@ -196,3 +195,4 @@ fig.tight_layout()
 
 #%%
 plots.plot_state_dynamics(state_debug_history)
+plots.plot_state_dynamics(state_debug_history, targets=debug_target)
