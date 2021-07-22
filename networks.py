@@ -10,7 +10,10 @@ class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
     def __init__(self, input_size, hidden_size, beta=None, tau=None, normalize_weight=False,
                  normalize_input=False, input_mode='init', num_steps=None, dt=1,
-                 fp_thres=0.001, fp_mode='iter'):
+                 fp_thres=0.001, fp_mode='iter', **kwargs):
+        if kwargs:
+            #kwargs ignores any extra values passed in (eg. via a Config object)
+            warnings.warn(f'Ignoring unused ModernHopfield kwargs: {kwargs}')
 
         super().__init__()
         self.input_size = input_size # M
@@ -36,7 +39,7 @@ class ModernHopfield(nn.Module):
         self.normalize_input = normalize_input
         self.input_mode = input_mode.lower()
         input_modes = ['init', 'cont', 'clamp'] #valid modes are all combinations of these
-        valid_input_modes = chain.from_iterable(combinations(input_modes, r) for r in range(1,len(input_modes)+1))
+        valid_input_modes = chain.from_iterable(combinations(input_modes, k) for k in range(1,len(input_modes)+1))
         valid_input_modes = ['+'.join(m) for m in valid_input_modes]
         assert self.input_mode in valid_input_modes, f"Invalid input mode: '{input_mode}'"
 
@@ -141,9 +144,11 @@ class ModernHopfield(nn.Module):
         f = self._f(h) #[B,N,1]
         v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
         state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
+        #     = (1-dt/tau)*v + (dt/tau)*v_instant
         if debug:
             state_debug = {}
-            for key in ['I', 'h', 'f', 'v_instant', 'state']:
+            for key in ['I', 'h', 'f', 'v_instant', 'state', 'v']:
+                #TODO: should be storing state *before* update? (only matters for 'cont' input_mode)
                 state_debug[key] = locals()[key].detach()
             return state_debug
         return state
@@ -151,20 +156,21 @@ class ModernHopfield(nn.Module):
 
     @torch.no_grad()
     def energy(self, v, I=torch.tensor(0.)):
-        #more general:
+        #general:
         # g = self._g(v)
         # h = self._h(g)
         # f = self._f(h)
         # Lv = self._Lv(v)
         # Lh = self._Lh(h)
 
-        # vg = ((v-I).transpose(-2,-1) @ g).squeeze(-2)
+        # vg = ((v).transpose(-2,-1) @ g).squeeze(-2)
         # hf = (h.transpose(-2,-1) @ f).squeeze(-2)
         # fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
         # E = (vg - Lv) + (hf - Lh) - fWg
 
+        #assuming f=softmax, g=id
         vv = ((v/2. - I).transpose(-2,-1) @ v).squeeze(-2)
-        lse = torch.logsumexp(self.W@v, -2)
+        lse = torch.logsumexp(self.beta*self.W@v, -2)/self.beta
         E = vv - lse
         return E
 
@@ -190,11 +196,11 @@ class ModernHopfield(nn.Module):
 
 
     def _Lh(self, h):
-        """f_u(h) = dLh/dh"""
-        return torch.logsumexp(h, -2) #[B,N,1]->[B,1] or #[N,1]->[1]
+        """f_u(h) = dLh/dh_u"""
+        return torch.logsumexp(self.beta*h, -2)/self.beta #[B,N,1]->[B,1] or #[N,1]->[1]
 
 
     def _Lv(self, v):
-        """g_i(v) = dLv/dv"""
+        """g_i(v) = dLv/dv_i"""
         vv = v.transpose(-2,-1) @ v #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
         return 0.5*vv.squeeze(-2) #[B,1,1]->[B,1] or #[1,1]->[1]
