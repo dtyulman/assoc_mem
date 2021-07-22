@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 #third-party
 import torch, joblib
@@ -11,56 +12,79 @@ if os.path.abspath('.').find('dtyulman') > -1:
     os.chdir('/home/dtyulman/projects/assoc_mem')
 
 #%%
-#get configs list
+train_config = cfg.Config({
+    'class': 'FPTrain', #FPTrain, SGDTrain
+    'batch_size': 50,
+    'lr': .1,
+    'lr_decay': 1.,
+    'print_every': 10,
+    'loss_mode': 'full', #full, class
+    'loss_fn': 'mse', #mse, cos, bce
+    'acc_mode': 'full', #full, class
+    'acc_fn' : 'mae', #mae, L0
+    'epochs': 0,
+    'device': 'cuda', #cuda, cpu
+    })
+
+net_config = cfg.Config({
+    'class': 'ModernHopfield',
+    'input_size': None, #if None, infer from dataset
+    'hidden_size': 50,
+    'normalize_weight': False,
+    'beta': 100,
+    'tau': 1,
+    'normalize_input': False,
+    'input_mode': 'cont', #init, cont, init+cont, clamp
+    'dt': 0.05,
+    'num_steps': 1000,
+    'fp_mode': 'iter', #iter, del2
+    'fp_thres':1e-9,
+    })
+
+
+data_values_config_mnist = cfg.Config({
+    'class': 'MNISTDataset',
+    'include_test': False,
+    'normalize' : True,
+    'num_samples': 50,
+    'balanced': False,
+    'crop': False,
+    'downsample': False,
+    })
+
+data_values_config_random = cfg.Config({
+    'class': 'RandomDataset',
+    'include_test': False,
+    'normalize' : True,
+    'num_samples': 50,
+    'distribution' : 'bern', #bern, unif, gaus
+    'input_size': 784,
+    'num_classes': 10,
+    })
+
+data_mode_config_classify = cfg.Config({
+    'classify': True,
+    'perturb_value': 0,
+    })
+
+data_mode_config_complete = cfg.Config({
+    'classify': False,
+    'perturb_frac': 0.5,
+    'perturb_mode': 'last',
+    'perturb_value': 0,
+    })
+
+
+#%%
+#be careful with in-place ops!
 baseconfig = cfg.Config({
-    'train': {'class': 'FPTrain', #FPTrain, SGDTrain
-              'batch_size': 50,
-              'lr': .1,
-              'lr_decay': 1.,
-              'print_every': 10,
-              'loss_mode': 'full', #full, class
-              'loss_fn': 'mse', #mse, cos, bce
-              'acc_mode': 'full', #full, class
-              'acc_fn' : 'mae', #mae, L0
-              'epochs': 500,
-              'device': 'cuda', #cuda, cpu
-              },
+    'train': deepcopy(train_config),
+    'net': deepcopy(net_config),
+    'data': {'values': deepcopy(data_values_config_mnist),
+             'mode': deepcopy(data_mode_config_complete)
+             },
+    })
 
-    'net': {'class': 'ModernHopfield',
-            'input_size': None, #if None, infer from dataset
-            'hidden_size': 50,
-            'normalize_weight': True,
-            'beta': 100,
-            'tau': 1,
-            'normalize_input': False,
-            'input_mode': 'clamp', #init, cont, clamp (combine w/ '+')
-            'dt': 0.05,
-            'num_steps': 1000,
-            'fp_mode': 'iter', #iter, del2
-            'fp_thres':1e-9,
-            },
-
-    'data': {'name': 'MNIST',
-             'include_test': False,
-             'normalize' : True,
-             'balanced': False,
-             'crop': False,
-             'downsample': False,
-             'subset': 50, #if int, takes only first N items
-
-             # 'mode': 'classify', #classify, complete
-             # 'perturb_frac': None, #perturb_frac or perturb_num must be None
-             # 'perturb_num': 10,
-             # 'perturb_mode': 'last',
-             # 'perturb_value': 0,
-
-             'mode': 'complete', #classify, complete
-             'perturb_frac': 0.5,
-             'perturb_num': None,
-             'perturb_mode': 'last',
-             'perturb_value': 0,
-             }
-    }) #alternatively can do cfg.get_config() and modify defaults, be careful with in-place ops
 
 # deltaconfigs = {'net.num_steps': [1, 1000],
 #                 'train.loss_mode': ['full', 'class'],
@@ -77,14 +101,7 @@ for config, label in zip(configs, labels):
     savedir = os.path.join(saveroot, label)
 
     #data
-    subset = config['data'].pop('subset')
-    if config['data'].pop('name') == 'MNIST':
-        aa_kwargs = {k : config['data'][k] for k in ['mode', 'perturb_frac', 'perturb_num', 'perturb_mode', 'perturb_value']}
-        mnist_kwargs = {k : config['data'][k] for k in ['include_test','normalize', 'balanced', 'crop', 'downsample']}
-        train_data, test_data = data.get_aa_mnist_data(mnist_kwargs, aa_kwargs)
-    if subset:
-        train_data.dataset.data = train_data.dataset.data[:50]
-        train_data.dataset.targets = train_data.dataset.targets[:50]
+    train_data, test_data = data.get_aa_data(config['data.values'], config['data.mode'])
 
     #network
     if config['net']['input_size'] is None:
@@ -123,20 +140,22 @@ import matplotlib.pyplot as plt
 
 #TODO: plot v-t averaged over B
 
-title = '{net}:{hid} W:{norm} $\\beta$={bet} $\\tau$={tau} in:{inp}\n' \
-        '{trn} B={bat} lr={lr} L:{loss} MNIST{sub}'.format(
-            net = 'MH',
-            hid = net.hidden_size,
-            norm = "nml" if net.normalize_weight else 'raw',
-            bet = net.beta,
-            tau = net.tau,
-            inp = net.input_mode,
-            trn = trainer.name[:2],
-            bat = train_loader.batch_size,
-            lr = trainer.lr,
-            loss = trainer.loss_mode,
-            sub = f':{subset}' if subset else '')
-
+# title = '{net}{hid} W:{norm} $\\beta$={bet} $\\tau$={tau} in:{inp}\n' \
+#         '{trn} B={bat} lr={lr} L:{loss} MNIST{sub}{dnorm}'.format(
+#             net = 'MH',
+#             hid = net.hidden_size,
+#             norm = "nml" if net.normalize_weight else 'raw',
+#             bet = net.beta,
+#             tau = net.tau,
+#             inp = net.input_mode,
+#             trn = trainer.name[:2],
+#             bat = train_loader.batch_size,
+#             lr = trainer.lr,
+#             loss = trainer.loss_mode,
+#             sub = f'{subset}' if subset else '',
+#             dnorm = ':nml' if config['data']['normalize'] else '',
+#             )
+title = ''
 net.to('cpu')
 #%%
 plots.plot_loss_acc(logger)
@@ -183,16 +202,15 @@ ax = ax.flatten()
 plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train, ax=ax[0])
 plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[1])
 plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps_train, ax=ax[2])
-# plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
-plots.plot_error_dynamics(state_debug_history, debug_target)
+plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
 
 [a.set_xlabel('') for a in ax[0:2]]
 [a.legend_.remove() for a in ax[0:-1]]
 fig.suptitle(title)
 w,h = fig.get_size_inches()
-fig.set_size_inches(1.5*w,1.5*h)
+fig.set_size_inches(1.5*w, 1.5*h)
 fig.tight_layout()
 
 #%%
-plots.plot_state_dynamics(state_debug_history)
-plots.plot_state_dynamics(state_debug_history, targets=debug_target)
+plots.plot_state_dynamics(state_debug_history[:40])
+plots.plot_state_dynamics(state_debug_history, targets=debug_target) #plot error instead of state

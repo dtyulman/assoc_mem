@@ -145,10 +145,10 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
 
     state_trajectory = get_trajectory_by_key(state_debug_history, 'state').numpy().squeeze(-1) #[T,B,M]
     if targets is not None: #plot error instead of state
-        cbar_label = 'Error (v-t)'
+        title = 'Error (v-t)'
         state_trajectory = state_trajectory - targets.squeeze(-1).unsqueeze(0).numpy() #[T,B,M]-[B,M]
     else:
-        cbar_label = 'State'
+        title = 'State'
 
     T,B,M = state_trajectory.shape
     num_steps_plotted = min(num_steps_plotted, T)
@@ -158,14 +158,14 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
     state_trajectory_images = []
     for b in range(B):
         individual_state_trajectory = state_trajectory[:,b] #[num_steps_plotted,M]
-        state_trajectory_images += rows_to_images(individual_state_trajectory, vpix=MNIST_VPIX,
-                                                  hpix=MNIST_VPIX)#, drop_last=MNIST_CLASSES)
+        state_trajectory_images += rows_to_images(individual_state_trajectory, #vpix=MNIST_VPIX,
+                                                  hpix=MNIST_HPIX)#, drop_last=MNIST_CLASSES)
     state_trajectory_images = images_to_grid(state_trajectory_images,
                                              rows=B, cols=num_steps_plotted, vpad=1)
 
     v = np.nanmax(np.abs(state_trajectory_images))
     im = ax.imshow(state_trajectory_images, cmap='RdBu_r', vmin=-v, vmax=v)
-    fig.colorbar(im, label=cbar_label)
+    fig.colorbar(im)
 
     xticks = np.arange(MNIST_HPIX//2, MNIST_HPIX*num_steps_plotted+MNIST_HPIX//2, MNIST_HPIX)
     ax.set_xticks(xticks)
@@ -177,9 +177,10 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
     ax.set_yticklabels([])
     ax.set_ylabel('Input')
 
+    ax.set_title(title)
+
     fig.set_size_inches(max(0.45*num_steps_plotted, 3), 0.41*B)
     fig.tight_layout()
-
 
 
 def plot_energy_dynamics(state_debug_history, net,
@@ -188,8 +189,7 @@ def plot_energy_dynamics(state_debug_history, net,
     input = get_trajectory_by_key(state_debug_history, 'I')
     energy = net.energy(state_trajectory, input).squeeze(-1)
 
-    ax = _plot_dynamics(energy,
-                              n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
+    ax = _plot_dynamics(energy, n_per_class=n_per_class, num_steps_train=num_steps_train, ax=ax)
     ax.set_ylabel('Energy')
 
     if (energy>0).any() and (energy<0).any():
@@ -226,12 +226,6 @@ def plot_hidden_dynamics(state_debug_history, apply_nonlin=True, transformation=
 
     ax.set_ylabel('{}($\\vec{{f}}$)'.format(transformation))
     return ax
-
-
-def plot_error_dynamics(state_debug_history, targets, ax=None):
-    state_trajectory = get_trajectory_by_key(state_debug_history, 'state') #[T,B,M]
-    e
-
 
 
 ###############

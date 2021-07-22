@@ -4,14 +4,18 @@ import matplotlib.pyplot as plt
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
 class AssociativeTrain():
     def __init__(self, net, train_loader, test_loader=None, lr=0.001, lr_decay=1.,
                  loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0',
-                 logger=None, logdir=None, print_every=100, sparse_logging_factor=10):#, **kwargs):
-        #kwargs ignores any extra values passed in via a Config
+                 logger=None, logdir=None, print_every=100, sparse_logging_factor=10, **kwargs):
+        if kwargs:
+            #kwargs ignores any extra values passed in (eg. via a Config object)
+            warnings.warn(f'Ignoring unused AssociativeTrain kwargs: {kwargs}')
+
         self.name = None
         self.net = net
         self.set_device()
@@ -31,6 +35,7 @@ class AssociativeTrain():
 
         if logger is None:
             self.logger = Logger(logdir)
+            self.write_log() #log everything before training occurs
         else:
             self.logger = logger
 
@@ -61,12 +66,8 @@ class AssociativeTrain():
 
 
     def __call__(self, epochs=10, label=''):
-        print(f'Training: {self.name}' + (f', {label}' if label else ''))
         self.set_device()
-
-        with Timer():
-            if self.logger.iteration == 0:
-                self.write_log()
+        with Timer(f'{self.__class__.__name__}' + (f', {label}' if label else '')):
             for _ in range(epochs):
                 self.logger.epoch += 1
                 for batch in self.train_loader:
@@ -76,6 +77,8 @@ class AssociativeTrain():
                     output = self.net(input, clamp_mask)
                     self._update_parameters(output, target)
 
+                    #bug/feature: logs the resulting loss after the param update,
+                    #not the loss which caused the update
                     self.write_log(output=output, target=target)
 
                 if self.lr_decay:
@@ -287,14 +290,13 @@ class Timer():
     def __exit__(self, *args):
         stop_time = time.perf_counter()
         elapsed = stop_time - self.start_time
-        elapsed_str = f'Time elapsed: {elapsed}'
-        if self.name is not None:
-            elapsed_str = f'{self.name}: {elapsed_str} sec'
+        details_str = f' ({self.name})' if self.name is not None else ''
+        elapsed_str = 'Time elapsed{}: {} sec'.format(details_str, elapsed)
         print(elapsed_str)
 
 
 
-class Logger(torch.utils.tensorboard.SummaryWriter):
+class Logger(SummaryWriter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.event_acc = EventAccumulator(self.get_logdir())
@@ -302,8 +304,10 @@ class Logger(torch.utils.tensorboard.SummaryWriter):
         self.epoch = 0 #number of times through the entire dataset
         self.iteration = 0 #number of batches, depends on batch size
 
+        self._new_style = False
 
     def __getitem__(self, key):
+        # https://stackoverflow.com/questions/41074688/how-do-you-read-tensorboard-files-programmatically
         self.event_acc.Reload() #TODO: necessary/expensive every time? can add "is_stale" flag
         try:
             walltimes, steps, vals = zip(*self.event_acc.Scalars(key))
@@ -323,8 +327,7 @@ class Logger(torch.utils.tensorboard.SummaryWriter):
                 if key in keylist:
                     return True
             except:
-                #not every keylist is actually a list, ignore it if it's not
-                pass
+                pass #not every keylist is actually a list, ignore it if it's not
         return False
 
 
@@ -345,16 +348,14 @@ class Logger(torch.utils.tensorboard.SummaryWriter):
         return log_dict
 
 
-    def add_scalar(self, tag, scalar_value, global_step=None):
+    def add_scalar(self, tag, scalar_value, global_step=None): #overrides SummaryWriter method
         try:
             scalar_value = scalar_value.item()
         except AttributeError:
             pass
 
         step = self.iteration if global_step is None else global_step
-        super().add_scalar(tag, scalar_value, global_step=step, walltime=None, new_style=True)
-
-
+        super().add_scalar(tag, scalar_value, global_step=step, walltime=None, new_style=self._new_style)
 
 
 

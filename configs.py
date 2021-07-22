@@ -102,93 +102,25 @@ def verify_items(config, constraint, mode='raise'):
 
 
 def verify_config(config, mode='raise'):
-    if config['data']['mode'] == 'complete':
+    if config['data']['mode']['classify']:
+        constraint = {
+            'train.acc_fn' : 'L0',
+            'train.acc_mode' : 'class',
+            'data.mode.perturb_mode' : 'last',
+            'data.mode.perturb_value' : 0}
+        if config['data.values.class'] == 'MNISTDataset':
+            constraint.update({'data.mode.perturb_num' : 10,
+                               'data.mode.perturb_frac' : None})
+        elif config['data.values.class'] == 'RandomDataset':
+            constraint.update({'data.mode.perturb_num': config['data.values.num_classes'],
+                               'data.mode.perturb_frac' : None})
+        else:
+            raise ValueError(f"Invalid dataset class: {config['data.values.class']}")
+    else:
         constraint = {
             'train.acc_fn' : 'mae',
             'train.acc_mode' : 'full',
             'train.loss_mode' : 'full'
             }
-    elif config['data']['mode'] == 'classify':
-        constraint = {
-            'train.acc_fn' : 'L0',
-            'train.acc_mode' : 'class',
-            'data.perturb_mode' : 'last',
-            'data.perturb_value' : 0,
-            }
-        if config['data']['name'] == 'MNIST':
-            constraint.update({'data.perturb_num' : 10,
-                               'data.perturb_frac' : None
-                               })
+
     return verify_items(config, constraint)
-
-
-###################
-# Default configs #
-###################
-# Training
-train_config = Config({
-    'class': 'FPTrain', #FPTrain, SGDTrain
-    'batch_size': 50,
-    'lr': .1,
-    'lr_decay': 1.,
-    'print_every': 10,
-    'loss_mode': 'full', #full, class
-    'loss_fn': 'mse', #mse, cos, bce
-    'acc_mode': 'class', #full, class
-    'acc_fn' : 'L0', #mae, L0
-    'epochs': 5000,
-    'device': 'cuda', #cuda, cpu
-    })
-
-
-# Networks
-net_config = Config({
-    'class': 'ModernHopfield',
-    'input_size': None, #if None, infer from dataset
-    'hidden_size': 50,
-    'normalize_weight': False,
-    'beta': 100,
-    'tau': 1,
-    'normalize_input': False,
-    'input_mode': 'cont', #init, cont, init+cont, clamp
-    'dt': 0.05,
-    'num_steps': 1000,
-    'fp_mode': 'iter', #iter, del2
-    'fp_thres':1e-9,
-    })
-
-
-# Datasets
-data_config = Config({
-    'name': 'MNIST',
-    'include_test': False,
-    'normalize' : True,
-    'balanced': False,
-    'crop': False,
-    'downsample': False,
-    'subset': 50, #if int, takes only first N items
-    'mode': 'classify', #classify, complete
-    'perturb_frac': None,
-    'perturb_num': 10,
-    'perturb_mode': 'last',
-    'perturb_value': 0,
-    })
-
-
-###################
-# Premade configs #
-###################
-def get_config(name='default'):
-    if name == 'default':
-        config = Config({
-            'net': net_config,
-            'data': data_config,
-            'train': train_config
-            })
-    elif name == 'sgd':
-        config = get_config()
-        config['train']['name'] = 'SGD'
-        del config['train']['lr']
-    else:
-        raise ValueError(f"Invalid config name: '{name}'")
-    return deepcopy(config)
