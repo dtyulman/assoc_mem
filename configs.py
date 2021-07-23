@@ -90,7 +90,12 @@ def verify_items(config, constraint, mode='raise'):
     """For each key in the constraint dict, asserts that config[key] is equal to that value. If not,
     raises an error or sets the config item to that value and issues a warning"""
     for key, value in constraint.items():
-        if config[key] != value:
+        try:
+            satisfied_constraint = config[key] in value
+        except:
+            satisfied_constraint = config[key] == value
+
+        if not satisfied_constraint:
             if mode == 'raise':
                 raise ValueError(f"Config error: {key}={config[key]}, requires {value}")
             elif mode == 'set':
@@ -109,18 +114,17 @@ def verify_config(config, mode='raise'):
             'data.mode.perturb_mode' : 'last',
             'data.mode.perturb_value' : 0}
         if config['data.values.class'] == 'MNISTDataset':
-            constraint.update({'data.mode.perturb_num' : 10,
-                               'data.mode.perturb_frac' : None})
+            constraint.update({'data.mode.perturb_entries' : 10})
         elif config['data.values.class'] == 'RandomDataset':
-            constraint.update({'data.mode.perturb_num': config['data.values.num_classes'],
-                               'data.mode.perturb_frac' : None})
+            constraint.update({'data.mode.perturb_entries': config['data.values.num_classes']})
         else:
             raise ValueError(f"Invalid dataset class: {config['data.values.class']}")
     else:
         constraint = {
-            'train.acc_fn' : 'mae',
+            # 'train.acc_fn' : 'mae',
             'train.acc_mode' : 'full',
-            'train.loss_mode' : 'full'
+            'train.loss_mode' : 'full',
+            'data.values.normalize' : ['data', False]
             }
 
     return verify_items(config, constraint)

@@ -21,7 +21,7 @@ train_config = cfg.Config({
     'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'full', #full, class
-    'acc_fn' : 'mae', #mae, L0
+    'acc_fn' : 'L0', #cls, L0, L1/mae
     'epochs': 0,
     'device': 'cuda', #cuda, cpu
     })
@@ -30,61 +30,48 @@ net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
     'hidden_size': 50,
-    'normalize_weight': False,
+    'normalize_weight': True,
     'beta': 100,
     'tau': 1,
     'normalize_input': False,
-    'input_mode': 'cont', #init, cont, init+cont, clamp
+    'input_mode': 'clamp', #init, cont, init+cont, clamp
     'dt': 0.05,
     'num_steps': 1000,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
     })
 
-
-data_values_config_mnist = cfg.Config({
-    'class': 'MNISTDataset',
+data_values_config = cfg.Config({
+    'class': 'RandomDataset', #MNISTDataset, RandomDataset
     'include_test': False,
-    'normalize' : True,
+    'normalize' : 'data', #data, data+targets, False
     'num_samples': 50,
-    'balanced': False,
+    'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
+
+    #MNISTDataset only
     'crop': False,
     'downsample': False,
-    })
 
-data_values_config_random = cfg.Config({
-    'class': 'RandomDataset',
-    'include_test': False,
-    'normalize' : True,
-    'num_samples': 50,
-    'distribution' : 'bern', #bern, unif, gaus
+    #RandomDataset only
+    'distribution': 'bern', #bern, unif, gaus
     'input_size': 784,
     'num_classes': 10,
     })
 
-data_mode_config_classify = cfg.Config({
-    'classify': True,
-    'perturb_value': 0,
-    })
-
-data_mode_config_complete = cfg.Config({
+data_mode_config = cfg.Config({
     'classify': False,
-    'perturb_frac': 0.5,
+    'perturb_entries': 0.5,
     'perturb_mode': 'last',
     'perturb_value': 0,
     })
 
-
 #%%
-#be careful with in-place ops!
 baseconfig = cfg.Config({
     'train': deepcopy(train_config),
     'net': deepcopy(net_config),
-    'data': {'values': deepcopy(data_values_config_mnist),
-             'mode': deepcopy(data_mode_config_complete)
-             },
-    })
-
+    'data': {'values': deepcopy(data_values_config),
+             'mode': deepcopy(data_mode_config)},
+    }) #be careful with in-place ops!
 
 # deltaconfigs = {'net.num_steps': [1, 1000],
 #                 'train.loss_mode': ['full', 'class'],
@@ -182,19 +169,17 @@ n_per_class = 5
 debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data)
 plots.plot_data_batch(debug_input, debug_target)
 
-state_debug_history = net(debug_input, debug=True)
+state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
 plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True)
 
 #%%
 n_per_class = 1
 debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
-if net.input_mode == 'clamp':
-    net.clamp_mask = ~debug_perturb_mask
 
 num_steps_train = net.num_steps
 net.num_steps = 200#int(100/net.dt)
 net.fp_thres = 0
-state_debug_history = net(debug_input, debug=True)
+state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
 
 fig, ax = plt.subplots(2,2, sharex=True)
 ax = ax.flatten()
@@ -212,5 +197,5 @@ fig.set_size_inches(1.5*w, 1.5*h)
 fig.tight_layout()
 
 #%%
-plots.plot_state_dynamics(state_debug_history[:40])
+plots.plot_state_dynamics(state_debug_history)
 plots.plot_state_dynamics(state_debug_history, targets=debug_target) #plot error instead of state

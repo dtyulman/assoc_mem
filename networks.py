@@ -70,14 +70,6 @@ class ModernHopfield(nn.Module):
         return state, external_current, clamp_values
 
 
-    def _maybe_clamp(self, state, clamp_mask, clamp_values):
-        """Runs at every step of the dynamics. Overwrites the clamped neurons, specified
-        by boolean clamp_mask"""
-        if self.input_mode == 'clamp':
-            state[clamp_mask] = clamp_values
-        return state
-
-
     def forward(self, input, clamp_mask=None, debug=False):
         self._maybe_normalize_weight()
         state, external_current, clamp_values = self._initialize_input(input, clamp_mask) #[B,M,1],[B,M,1]
@@ -87,18 +79,21 @@ class ModernHopfield(nn.Module):
         update_magnitude = float('inf')
         step = 0
         while update_magnitude > self.fp_thres and step < self.num_steps:
-            prev_state = self._maybe_clamp(state, clamp_mask, clamp_values)
-            state = self.update_state(prev_state, external_current, debug=debug) #[B,M,1]
+            prev_state = state
+            state = self.update_state(prev_state, external_current, clamp_mask, clamp_values, debug=debug) #[B,M,1]
             step += 1
 
             if debug: #state is actually state_debug
                 state_debug_history.append(state) #store it
                 state = state['state'] #extract the actual state from the dict
+
+            #check convergence
             with torch.no_grad():
                 update_magnitude = (prev_state-state).norm()
             if step > self.num_steps and update_magnitude > self.fp_thres:
                 warnings.warn('Not converged: '
                       f'(update={update_magnitude}, fp_thres={self.fp_thres})')
+
         if debug:
             return state_debug_history
         return state
@@ -135,7 +130,7 @@ class ModernHopfield(nn.Module):
     #     return p
 
 
-    def update_state(self, v, I=torch.tensor(0.), debug=False):
+    def update_state(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
         """
         Continuous: tau*dv/dt = -v + X*softmax(X^T*v)
         Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + X*softmax(X^T*v(t))]
@@ -145,6 +140,10 @@ class ModernHopfield(nn.Module):
         v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
         state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
         #     = (1-dt/tau)*v + (dt/tau)*v_instant
+
+        if self.input_mode == 'clamp':
+            state[clamp_mask] = clamp_values
+
         if debug:
             state_debug = {}
             for key in ['I', 'h', 'f', 'v_instant', 'state', 'v']:

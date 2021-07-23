@@ -24,15 +24,27 @@ class ClassifyDatasetBase(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def _normalize(self, mode):
+        if mode == 'data': #normalize each sample to unit vector
+            self.data = self.data/self.data.norm(dim=1, keepdim=True)
+        elif mode == 'data+targets':
+            norm = torch.cat((self.data, self.targets), dim=1).norm(dim=1, keepdim=True)
+            self.data = self.data/norm
+            self.targets = self.targets/norm
+        elif mode != False:
+            raise ValueError(f'Invalid normalization mode: {mode}')
+
+
 
 class RandomDataset(ClassifyDatasetBase):
-    def __init__(self, num_samples=50, input_size=20, num_classes=2, distribution='bern', **kwargs):
+    def __init__(self, num_samples=50, input_size=20, num_classes=2, normalize=False,
+                 distribution='bern', **kwargs):
         self.input_size = input_size
         self.target_size = num_classes
         self.num_classes = num_classes
 
         _targets = torch.randint(num_classes,(num_samples,))
-        self.targets = F.one_hot(_targets, num_classes=num_classes)
+        self.targets = F.one_hot(_targets, num_classes=num_classes).unsqueeze(-1)
 
         if distribution == 'bern':
             p = kwargs.pop('p', 0.5)
@@ -54,6 +66,9 @@ class RandomDataset(ClassifyDatasetBase):
         if kwargs:
             warnings.warn(f'Ignoring unused RandomDataset kwargs: {kwargs}')
 
+        self._normalize(normalize)
+
+
 
 class MNISTDataset(ClassifyDatasetBase):
     def __init__(self, num_samples=None, test=False, balanced=False, crop=False, downsample=False,
@@ -73,7 +88,7 @@ class MNISTDataset(ClassifyDatasetBase):
 
         #apply target transformations
         self.num_classes = 10
-        self.targets = F.one_hot(self.targets, num_classes=self.num_classes)
+        self.targets = F.one_hot(self.targets, num_classes=self.num_classes).unsqueeze(-1)
         self.target_size = self.targets.shape[1]
 
         #apply data transformations
@@ -86,10 +101,10 @@ class MNISTDataset(ClassifyDatasetBase):
             self.data = self.data[:, ::downsample, ::downsample]
         num_samples, vpix, hpix = self.data.shape
         self.data = self.data.view(num_samples, vpix*hpix, 1) #flatten
-        if normalize: #normalize each sample to unit vector
-            self.data = self.data/self.data.norm(dim=1, keepdim=True)
+        self._normalize(normalize) #maybe normalize
 
         self.input_size = self.data.shape[1]
+
 
 
 def get_data(**kwargs):
@@ -112,7 +127,7 @@ def get_data(**kwargs):
 # Associative wrapper #
 #######################
 class AssociativeDataset(Dataset):
-    def __init__(self, dataset, classify=False, perturb_mode='last', perturb_frac=None, perturb_num=None,
+    def __init__(self, dataset, classify=False, perturb_mode='last', perturb_entries=0.5,
                  perturb_value=0, **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
@@ -120,16 +135,23 @@ class AssociativeDataset(Dataset):
 
         self.dataset = dataset
         self.classify = classify
-        self.input_size = dataset.input_size + dataset.target_size
+
+        self.input_size = dataset.input_size
+        if self.classify:
+            self.input_size += dataset.target_size
         self.target_size = self.input_size
 
-        assert (perturb_frac is None) != (perturb_num is None), \
-            "Must specify either the fraction xor the number of entries to perturb"
-        self.perturb_frac, self.perturb_num = perturb_frac, perturb_num
-        if perturb_frac is None:
-            self.perturb_frac = float(perturb_num) / self.input_size
-        elif perturb_num is None:
+        if perturb_entries < 1: #specified the fraction of entries to perturb
+            self.perturb_frac = perturb_entries
             self.perturb_num = int(self.input_size*self.perturb_frac)
+        else: #specified the number of entries to perturb
+            self.perturb_num = perturb_entries
+            self.perturb_frac = float(self.perturb_num) / self.input_size
+        assert 0 < self.perturb_frac < 1, \
+            'Must have 0 < perturb_frac ({self.perturb_frac}) < 1'
+        assert self.perturb_num < self.input_size, \
+            'Must have perturb_num ({self.perturb_num}) < input_size ({self.input_size})'
+
 
         assert perturb_mode in ['rand', 'first', 'last']
         self.perturb_mode = perturb_mode
@@ -204,7 +226,7 @@ def filter_classes(dataset, select_classes='all', n_per_class=None, sort_by_clas
 
     selected_idx_per_class = []
     for c in select_classes:
-        idx = (targets == c).nonzero().squeeze()
+        idx = (targets == c).nonzero().squeeze().view(-1)
         if n_per_class is not None:
             idx = idx[:n_per_class] #only take the first n_per_class items of this class
         selected_idx_per_class.append(idx)

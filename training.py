@@ -39,6 +39,7 @@ class AssociativeTrain():
         else:
             self.logger = logger
 
+
     def _set_loss_mode(self, loss_mode, loss_fn):
         assert loss_mode in ['class', 'full'], f"Invalid loss mode: '{loss_mode}'"
         self.loss_mode = loss_mode
@@ -61,6 +62,8 @@ class AssociativeTrain():
             self.acc_fn = l0_acc
         elif acc_fn == 'L1' or acc_fn == 'mae':
             self.acc_fn = l1_acc
+        elif acc_fn == 'cls':
+            self.acc_fn = classifier_acc
         else:
             raise ValueError(f"Invalid accuracy function: '{acc_fn}'")
 
@@ -77,7 +80,7 @@ class AssociativeTrain():
                     output = self.net(input, clamp_mask)
                     self._update_parameters(output, target)
 
-                    #bug/feature: logs the resulting loss after the param update,
+                    #bug/feature: logs the resulting loss/acc *after* the param update,
                     #not the loss which caused the update
                     self.write_log(output=output, target=target)
 
@@ -214,11 +217,10 @@ class FPTrain(AssociativeTrain):
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
             dLd_W = dLdW / Z - self.net._W *(S / Z**3)
-            self.net._W -= self.lr * dLd_W
         else:
             dLd_W = dLdW
 
-        self.net._W -= self.lr * dLdW
+        self.net._W -= self.lr * dLd_W
         self.logger('train/grad_norm', dLd_W.norm())
 
 
@@ -359,11 +361,13 @@ class Logger(SummaryWriter):
 
 
 
-def l0_acc(output, target):
+def classifier_acc(output, target):
     output_class = torch.argmax(output, dim=1)
     target_class = torch.argmax(target, dim=1)
-    return (output_class == target_class).float().mean()
+    return l0_acc(output_class, target_class)
 
+def l0_acc(output, target):
+    return (output == target).float().mean()
 
 def l1_acc(output, target):
     return 1 - F.l1_loss(output, target)
