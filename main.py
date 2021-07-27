@@ -15,36 +15,37 @@ if os.path.abspath('.').find('dtyulman') > -1:
 train_config = cfg.Config({
     'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
-    'lr': .1,
-    'lr_decay': 1.,
+    'lr': 1,
+    'lr_decay': 1,
+    'momentum': 0.999,
     'print_every': 10,
     'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
-    'acc_mode': 'full', #full, class
-    'acc_fn' : 'L0', #cls, L0, L1/mae
-    'epochs': 0,
+    'acc_mode': 'class', #full, class
+    'acc_fn' : 'cls', #cls, L0, L1/mae
+    'epochs': 500,
     'device': 'cuda', #cuda, cpu
     })
 
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 50,
+    'hidden_size': 100,
     'normalize_weight': True,
-    'beta': 100,
+    'beta': 10,
     'tau': 1,
     'normalize_input': False,
     'input_mode': 'clamp', #init, cont, init+cont, clamp
     'dt': 0.05,
-    'num_steps': 1000,
+    'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
     })
 
 data_values_config = cfg.Config({
-    'class': 'RandomDataset', #MNISTDataset, RandomDataset
+    'class': 'MNISTDataset', #MNISTDataset, RandomDataset
     'include_test': False,
-    'normalize' : 'data', #data, data+targets, False
+    'normalize' : 'data+targets', #data, data+targets, False
     'num_samples': 50,
     'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
 
@@ -59,10 +60,10 @@ data_values_config = cfg.Config({
     })
 
 data_mode_config = cfg.Config({
-    'classify': False,
-    'perturb_entries': 0.5,
+    'classify': True,
+    'perturb_entries': 10,
     'perturb_mode': 'last',
-    'perturb_value': 0,
+    'perturb_value': 'min', #min, max, rand, <float>
     })
 
 #%%
@@ -105,7 +106,7 @@ for config, label in zip(configs, labels):
         test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
     else:
         if batch_size < len(train_data):
-            test_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size)
+            test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
         else:
             test_loader = None
     TrainerClass = getattr(training, config['train'].pop('class'))
@@ -150,13 +151,12 @@ plots.plot_loss_acc(logger)
 #%%
 plot_class=True
 if net.normalize_weight:
-    fig, ax = plt.subplots(1,2)
+    fig, ax = plt.subplots(1,2, sharex=True, sharey=True)
     plots.plot_weights_mnist(net._W, plot_class=plot_class, ax=ax[0])
     ax[0].set_title('Raw')
     plots.plot_weights_mnist(net.W, plot_class=plot_class, ax=ax[1])
     ax[1].set_title('Normalized')
-    w,h = fig.get_size_inches()
-    fig.set_size_inches(w*1.5, h)
+    plots.scale_fig(fig, 1.5)
 else:
     ax = plots.plot_weights_mnist(net._W, plot_class=plot_class)
     ax.set_title('Raw (no normalization)')
@@ -165,8 +165,8 @@ fig.tight_layout()
 
 
 #%%
-n_per_class = 5
-debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data)
+n_per_class = 4
+debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 plots.plot_data_batch(debug_input, debug_target)
 
 state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
@@ -177,8 +177,8 @@ n_per_class = 1
 debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 
 num_steps_train = net.num_steps
-net.num_steps = 200#int(100/net.dt)
-net.fp_thres = 0
+# net.num_steps = 2000#int(100/net.dt)
+# net.fp_thres = 1e-9
 state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
 
 fig, ax = plt.subplots(2,2, sharex=True)
@@ -192,10 +192,12 @@ plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformati
 [a.set_xlabel('') for a in ax[0:2]]
 [a.legend_.remove() for a in ax[0:-1]]
 fig.suptitle(title)
-w,h = fig.get_size_inches()
-fig.set_size_inches(1.5*w, 1.5*h)
+plots.scale_fig(fig, 1.5, 1.5)
 fig.tight_layout()
 
 #%%
-plots.plot_state_dynamics(state_debug_history)
-plots.plot_state_dynamics(state_debug_history, targets=debug_target) #plot error instead of state
+fig, ax = plt.subplots(2,1, sharex=True, sharey=True)
+plots.plot_state_dynamics(state_debug_history, ax=ax[0])
+plots.plot_state_dynamics(state_debug_history, targets=debug_target, ax=ax[1]) #plot error instead of state
+plots.scale_fig(fig, 1.6, 3.5)
+fig.tight_layout()

@@ -22,7 +22,7 @@ class AssociativeTrain():
 
         self.train_loader = train_loader
         self.test_loader = test_loader
-        self.n_class_units = train_loader.dataset.target_size #Mc
+        self.n_class_units = train_loader.dataset.dataset.num_classes #Mc
 
         self._set_loss_mode(loss_mode, loss_fn)
         self._set_acc_mode(acc_mode, acc_fn)
@@ -142,7 +142,7 @@ class AssociativeTrain():
 
             self.logger('train/loss', train_loss)
             self.logger('train/acc', train_acc)
-            log_str = 'ep={:3d} it={:5d} loss={:.5f} acc={:.3f}' \
+            log_str = 'ep={:3d} it={:5d} loss={:.5e} acc={:.3f}' \
                          .format(self.logger.epoch, self.logger.iteration, train_loss, train_acc)
 
             #test loss/acc if applicable
@@ -150,13 +150,13 @@ class AssociativeTrain():
                 test_batch = next(iter(self.test_loader))
                 test_input, test_target, test_clamp_mask = self._prep_data(*test_batch)
 
-                test_output = self.net(test_input)
+                test_output = self.net(test_input, test_clamp_mask)
                 test_loss = self.compute_loss(test_output, test_target)
                 test_acc = self.compute_acc(test_output, test_target)
 
                 self.logger('test/loss', test_loss)
-                self.logger['test_acc'].append(test_acc.item())
-                log_str += ' test_loss={:.5f} test_acc={:.3f}'.format(test_loss, test_acc)
+                self.logger('test/acc', test_acc)
+                log_str += ' test_loss={:.5e} test_acc={:.3f}'.format(test_loss, test_acc)
 
             #params / param stats
             for param_name, param_value in self.net.named_parameters():
@@ -191,13 +191,16 @@ class SGDTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, lr=0.1, **kwargs):
+    def __init__(self, net, train_loader, test_loader=None, lr=0.1, momentum=0, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         #modified default lr
         super().__init__(net, train_loader, test_loader, lr=lr, **kwargs)
         self.name = 'FPT'
         assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
         self.verify_grad = False #for sanity-checking dLdW against non-batched version
+
+        self.momentum = momentum #https://distill.pub/2017/momentum/
+        self.grad_avg = 0
 
 
     @torch.no_grad()
@@ -219,6 +222,10 @@ class FPTrain(AssociativeTrain):
             dLd_W = dLdW / Z - self.net._W *(S / Z**3)
         else:
             dLd_W = dLdW
+
+        if self.momentum > 0:
+            dLd_W = dLd_W + self.momentum*self.grad_avg
+            self.grad_avg = dLd_W
 
         self.net._W -= self.lr * dLd_W
         self.logger('train/grad_norm', dLd_W.norm())
@@ -307,6 +314,7 @@ class Logger(SummaryWriter):
         self.iteration = 0 #number of batches, depends on batch size
 
         self._new_style = False
+
 
     def __getitem__(self, key):
         # https://stackoverflow.com/questions/41074688/how-do-you-read-tensorboard-files-programmatically

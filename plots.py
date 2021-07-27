@@ -78,29 +78,35 @@ def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=Tr
     return ax
 
 
-def plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True, ax=None):
+def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=True, ax=None):
     fig, ax = prep_axes(ax,2,1)
 
     key = 'f' if apply_nonlin else 'h'
-    h = state_debug_history[-1][key].detach()
+    h = state_debug_history[-1][key].detach() #[B,N,1]
     assert len(h.shape)==3, 'Hidden activity must have three dimensions: [B,N,1]'
-    max_h_value, max_h_idx = torch.max(h, dim=1)
+    max_h_value, max_h_idx = torch.max(h.squeeze(), dim=1) #[B,N]-->([B],[B])
+
+    if n_per_class is None:
+        max_h_idx, sort = torch.sort(max_h_idx)
+        max_h_value = max_h_value[sort]
 
     ax[0].plot(max_h_idx, ls='', marker='.')
     ax[0].set_ylabel('Most active unit')
 
     ax[1].plot(max_h_value, ls='', marker='.')
     ax[1].set_ylabel(f'Activity $({key})$')
-    ax[1].set_xlabel(f'Digit ({n_per_class} samples each)')
-
-    size_data = h.shape[0] #B
-    n_classes = size_data//n_per_class
-    for a in ax.flatten():
-        xticks = np.linspace(0,size_data, n_classes+1)
-        for x in xticks:
-            a.axvline(x, color='k', lw=0.5)
-        a.set_xticks(xticks+n_per_class/2)
-        a.set_xticklabels(list(range(10))+[None])
+    if n_per_class is None:
+        ax[1].set_xlabel('Sample')
+    else:
+        ax[1].set_xlabel(f'Class ({n_per_class} samples each)')
+        size_data = h.shape[0] #B
+        n_classes = size_data//n_per_class
+        for a in ax.flatten():
+            xticks = np.linspace(0,size_data, n_classes+1)
+            for x in xticks:
+                a.axvline(x, color='k', lw=0.5)
+            a.set_xticks(xticks+n_per_class/2)
+            a.set_xticklabels(list(range(n_classes))+[None])
 
 
 def _plot_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, legend='auto', ax=None):
@@ -165,7 +171,9 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
 
     v = np.nanmax(np.abs(state_trajectory_images))
     im = ax.imshow(state_trajectory_images, cmap='RdBu_r', vmin=-v, vmax=v)
-    fig.colorbar(im)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='2%', pad=0.05)
+    fig.colorbar(im, cax=cax)
 
     xticks = np.arange(MNIST_HPIX//2, MNIST_HPIX*num_steps_plotted+MNIST_HPIX//2, MNIST_HPIX)
     ax.set_xticks(xticks)
@@ -285,3 +293,9 @@ def prep_axes(ax=None, nrows=1, ncols=1, **kwargs):
             assert len(ax.flatten()) == nrows*ncols
         fig = ax.get_figure()
     return fig, ax
+
+
+def scale_fig(fig, wscale=1, hscale=1):
+    w,h = fig.get_size_inches()
+    fig.set_size_inches(wscale*w, hscale*h)
+    return fig

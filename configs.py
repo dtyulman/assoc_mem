@@ -109,7 +109,7 @@ def verify_items(config, constraint, mode='raise'):
 def verify_config(config, mode='raise'):
     if config['data']['mode']['classify']:
         constraint = {
-            'train.acc_fn' : 'L0',
+            'train.acc_fn' : 'cls',
             'train.acc_mode' : 'class',
             'data.mode.perturb_mode' : 'last',
             'data.mode.perturb_value' : 0}
@@ -126,5 +126,8 @@ def verify_config(config, mode='raise'):
             'train.loss_mode' : 'full',
             'data.values.normalize' : ['data', False]
             }
+
+    # if config['data.values.balanced']:
+    #     constraint.update({'data.mode.perturb_value': -1})
 
     return verify_items(config, constraint)
