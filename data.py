@@ -156,8 +156,13 @@ class AssociativeDataset(Dataset):
         assert perturb_mode in ['rand', 'first', 'last']
         self.perturb_mode = perturb_mode
 
-        assert np.isreal(perturb_value) or perturb_value in ['rand', 'flip']
-        self.perturb_value = perturb_value
+        assert np.isreal(perturb_value) or perturb_value in ['rand', 'flip', 'min', 'max']
+        if perturb_value == 'min':
+            self.perturb_value = self.dataset.data.min()
+        elif perturb_value == 'max':
+            self.perturb_value == self.dataset.data.max()
+        else:
+            self.perturb_value = perturb_value
 
 
     def _perturb(self, datapoint):

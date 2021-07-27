@@ -1,4 +1,4 @@
-import os, datetime, gc
+import os, glob, datetime, gc
 import torch, joblib
 
 def initialize_savedir(baseconfig):
@@ -15,8 +15,10 @@ def initialize_savedir(baseconfig):
     ymd = datetime.date.today().strftime('%Y-%m-%d')
     saveroot = os.path.join(root, 'results', ymd)
     try:
-        run_number = int(sorted(os.listdir(saveroot))[-1])+1
-    except (FileNotFoundError, IndexError):
+        prev_run_dirs = glob.glob(os.path.join(saveroot, '[0-9]*'))
+        prev_run_dirs = sorted([os.path.split(d)[-1] for d in prev_run_dirs])
+        run_number = int(prev_run_dirs[-1])+1
+    except (FileNotFoundError, IndexError, ValueError):
         run_number = 0
     savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
     os.makedirs(savedir)

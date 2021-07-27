@@ -46,7 +46,7 @@ data_values_config = cfg.Config({
     'class': 'MNISTDataset', #MNISTDataset, RandomDataset
     'include_test': False,
     'normalize' : 'data+targets', #data, data+targets, False
-    'num_samples': 50,
+    'num_samples': 50, #if None takes entire MNISTDataset
     'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only

@@ -111,8 +111,7 @@ def verify_config(config, mode='raise'):
         constraint = {
             'train.acc_fn' : 'cls',
             'train.acc_mode' : 'class',
-            'data.mode.perturb_mode' : 'last',
-            'data.mode.perturb_value' : 0}
+            'data.mode.perturb_mode' : 'last',}
         if config['data.values.class'] == 'MNISTDataset':
             constraint.update({'data.mode.perturb_entries' : 10})
         elif config['data.values.class'] == 'RandomDataset':
@@ -126,8 +125,5 @@ def verify_config(config, mode='raise'):
             'train.loss_mode' : 'full',
             'data.values.normalize' : ['data', False]
             }
-
-    # if config['data.values.balanced']:
-    #     constraint.update({'data.mode.perturb_value': -1})
 
     return verify_items(config, constraint)
