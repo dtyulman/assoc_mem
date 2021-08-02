@@ -18,14 +18,16 @@ train_config = cfg.Config({
     'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
 
-    'lr': 0.0001,
+    'lr': 1,
     'lr_decay': 1.,
-    'momentum': 0.99,
-    'clip': False,
-    'rescale_grad': True,
-    'beta_decay': False, #1.00035,
+    'momentum': 0.9,
+    'clip_mode': False, #norm, value, None
+    'clip_thres': 1,
+    'rescale_grad': False,
+    'beta_increment': 1,
+    'beta_increment_epochs': 49,
 
-    'loss_mode': 'full', #full, class
+    'loss_mode': 'class', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'class', #full, class
     'acc_fn' : 'cls', #cls, L0, L1/mae
@@ -42,12 +44,13 @@ net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
     'hidden_size': 50,
+    'init': 'random', #random, data_mean, inputs, targets
     'normalize_weight': True,
     'dropout': False,
-    'beta': 20.,
+    'beta': 10.,
     'tau': 1.,
     'normalize_input': False,
-    'input_mode': 'init', #init, cont, init+cont, clamp
+    'input_mode': 'clamp', #init, cont, init+cont, clamp
     'dt': 0.1,
     'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
@@ -102,6 +105,7 @@ saveroot = utils.initialize_savedir(baseconfig)
 
 for config, label in zip(configs, labels):
     cfg.verify_config(config)
+    config_copy = deepcopy(config)
     print(config)
     savedir = os.path.join(saveroot, label)
 
@@ -111,13 +115,23 @@ for config, label in zip(configs, labels):
     #network
     if config['net']['input_size'] is None:
         config['net']['input_size'] = train_data[0][0].numel()
+    init = config['net'].pop('init')
     NetClass = getattr(networks, config['net'].pop('class'))
     net = NetClass(**config['net'])
-    # with torch.no_grad():
-    #     net._W += train_data[:][0].mean(dim=0).tile(1,net.hidden_size).T
-    #     net._maybe_normalize_weight()
     with torch.no_grad():
-        net._W.data = deepcopy(train_data[:][1].squeeze())
+        if init == 'random':
+            pass
+        elif init == 'data_mean':
+            net._W = train_data[:][0].mean(dim=0).tile(1,net.hidden_size).T
+            #add small noise to prevent identical hidden units
+            net._W += torch.randn_like(net._W)*net._W.std()/10
+        elif init == 'inputs':
+            net._W.data = train_data[:net.hidden_size][0].squeeze()
+        elif init == 'targets':
+            net._W.data = train_data[:net.hidden_size][1].squeeze()
+        else:
+            raise ValueError(f"Invalid network init: '{init}'")
+        net._maybe_normalize_weight()
 
 
     #training
@@ -148,6 +162,7 @@ for config, label in zip(configs, labels):
     #go
     net.to(device)
     logger = trainer(epochs, label=label)
+    logger.add_text('config', str(config_copy))
 
     # joblib.dump(logger, os.path.join(savedir, 'log.pkl'))
     torch.save(net, os.path.join(savedir, 'net.pt'))
@@ -182,19 +197,7 @@ net.to('cpu')
 plots.plot_loss_acc(logger)
 
 #%%
-plot_class=True
-if net.normalize_weight:
-    fig, ax = plt.subplots(1,2, sharex=True, sharey=True)
-    plots.plot_weights_mnist(net._W, plot_class=plot_class, ax=ax[0])
-    ax[0].set_title('Raw')
-    plots.plot_weights_mnist(net.W, plot_class=plot_class, ax=ax[1])
-    ax[1].set_title('Normalized')
-    plots.scale_fig(fig, 1.5)
-else:
-    ax = plots.plot_weights_mnist(net._W, plot_class=plot_class)
-    ax.set_title('Raw (no normalization)')
-    fig = ax.get_figure()
-fig.tight_layout()
+plots.plot_weights(net)
 
 
 #%%

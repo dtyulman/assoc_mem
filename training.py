@@ -184,16 +184,14 @@ class AssociativeTrain():
 
             #log plots/images more sparsely to save space
             if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
-                fig = plots.plot_weights_mnist(self.net.W, plot_class=True).get_figure()
-                self.logger.add_figure('W', fig, global_step=self.logger.iteration)
+                fig = plots.plot_weights(self.net)[0].get_figure()
+                self.logger.add_figure('weights', fig)
 
-
-                debug_batch = data.get_aa_debug_batch(self.train_loader.dataset,
-                                                      n_per_class=10)
+                debug_batch = data.get_aa_debug_batch(self.train_loader.dataset, n_per_class=10)
                 debug_input, debug_target, debug_clamp_mask = self._prep_data(*debug_batch)
                 state_debug_history = self.net(debug_input, clamp_mask=debug_clamp_mask, debug=True)
-                fig = plots.plot_hidden_max_argmax(state_debug_history, n_per_class=10)[0].get_figure()
-                self.logger.add_figure('hidden', fig, global_step=self.logger.iteration)
+                fig = plots.plot_hidden_max_argmax(state_debug_history, n_per_class=None)[0].get_figure()
+                self.logger.add_figure('hidden', fig)
 
             self.net.train()
             print(log_str)
@@ -218,20 +216,28 @@ class SGDTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, momentum=False, clip=False,
-                 rescale_grad=False, beta_decay=False, **kwargs):
+    def __init__(self, net, train_loader, test_loader=None, momentum=False, rescale_grad=False,
+                 clip_mode=False, clip_thres=0, beta_increment=False, beta_increment_epochs=0,
+                 **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
         self.name = 'FPT'
         assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
         self.verify_grad = False #for sanity-checking dLdW against non-batched version
 
-        self.momentum = momentum #https://distill.pub/2017/momentum/
+        #https://distill.pub/2017/momentum/
+        self.momentum = momentum
         self.grad_avg = 0
 
-        self.clip = clip
+        #https://neptune.ai/blog/understanding-gradient-clipping-and-how-it-can-fix-exploding-gradients-problem
+        assert clip_mode in ['norm', 'value', None]
+        self.clip_mode = clip_mode
+        self.clip_thres = clip_thres
+
         self.rescale_grad = rescale_grad
-        self.beta_decay = beta_decay
+
+        self.beta_increment = beta_increment
+        self.beta_increment_epochs = beta_increment_epochs
 
 
     @torch.no_grad()
@@ -250,27 +256,41 @@ class FPTrain(AssociativeTrain):
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
-            dLd_W = dLdW / Z - self.net._W *(S / Z**3)
+            dLd_W = dLdW / Z - self.net._W * (S / Z**3)
         else:
             dLd_W = dLdW
 
         if self.momentum:
             self.grad_avg = dLd_W + self.momentum*self.grad_avg
             dLd_W = self.grad_avg
-        if self.clip:
+        if self.clip_mode == 'norm':
             norm = dLd_W.norm()
-            if norm > self.clip:
-                dLd_W = self.clip*dLd_W/norm
+            if norm > self.clip_thres:
+                dLd_W = self.clip_thres*dLd_W/norm
+        elif self.clip_mode == 'value':
+            dLd_W[dLd_W > self.clip_thres] = self.clip_thres
+            dLd_W[dLd_W < -self.clip_thres] = -self.clip_thres
+
         if self.rescale_grad:
             dLd_W = dLd_W/dLd_W.max(dim=1, keepdim=True)[0]
         if self.reg_loss is not None:
             dLd_W -= self.reg_loss.grad()['_W']
 
         self.net._W -= self.lr * dLd_W
-        if self.beta_decay:
-            self.net.beta *= self.beta_decay
+        if self.beta_increment and self.logger.epoch < self.beta_increment_epochs:
+            self.net.beta += self.beta_increment
 
-        self.logger('train/grad_norm', dLd_W.norm())
+        if self.logger.iteration % self.print_every == 0:
+            self.logger('train/grad_norm', dLd_W.norm())
+        if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
+            if self.net.normalize_weight:
+                axs = plots.plot_weights(_W=dLd_W, W=dLdW)
+                axs[0].set_title('dL/d_W (gradient step)')
+                axs[1].set_title('dL/dW (wrt. normalized)')
+                fig = axs[0].get_figure()
+            else:
+                fig = plots.plot_weights(_W=dLd_W).get_figure()
+            self.logger.add_figure('gradient', fig)
 
 
     def compute_dLdW(self, v, t):
@@ -376,8 +396,7 @@ class Logger(SummaryWriter):
     def __contains__(self, key):
         for tag, keylist in self.event_acc.Tags().items():
             try:
-                if key in keylist:
-                    return True
+                if key in keylist: return True
             except:
                 pass #not every keylist is actually a list, ignore it if it's not
         return False
@@ -401,13 +420,15 @@ class Logger(SummaryWriter):
 
 
     def add_scalar(self, tag, scalar_value, global_step=None): #overrides SummaryWriter method
-        try:
-            scalar_value = scalar_value.item()
-        except AttributeError:
-            pass
-
+        try: scalar_value = scalar_value.item()
+        except AttributeError: pass
         step = self.iteration if global_step is None else global_step
         super().add_scalar(tag, scalar_value, global_step=step, walltime=None, new_style=self._new_style)
+
+
+    def add_figure(self, tag, scalar_value, global_step=None, **kwargs): #overrides SummaryWriter method
+        step = self.iteration if global_step is None else global_step
+        super().add_figure(tag, scalar_value, global_step=step, **kwargs)
 
 
 
