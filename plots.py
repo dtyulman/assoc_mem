@@ -30,52 +30,61 @@ def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
     return ax
 
 
-def plot_data_batch(inputs, targets, ax=None):
-    fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
 
-    inputs_list = rows_to_images(inputs.squeeze(), pad_nan=True)
-    targets_list = rows_to_images(targets.squeeze(), pad_nan=True)
-    data = [inputs_list, targets_list]
-    titles = ['Inputs', 'Targets']
-
-    for ax, data_list, title in zip(axs, data, titles):
-        #data: [B,M,1] or [B,Mc,1]
-        grid = images_to_grid(data_list, vpad=1, hpad=1)
-        im = ax.imshow(grid)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im, cax=cax)
-        ax.axis('off')
-        ax.set_title(title)
-
-    return axs
-
-
-def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=True, ax=None):
+def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
+                         cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
     fig, ax = prep_axes(ax)
-
+    mat = mat.squeeze()
     try:
-        W = W.cpu().detach().numpy()
+        mat = mat.cpu().detach().numpy()
     except:
         pass
 
-    if W.shape[0] > max_n_rows:
-        print(f'Plotting only the first {max_n_rows}/{W.shape[0]} entries')
-        W = W[:max_n_rows]
+    imgs = rows_to_images(mat, drop_last=drop_last, pad_nan=pad_nan)
+    grid = images_to_grid(imgs, vpad=1, hpad=1)
 
-    if plot_class:
-        img_list = rows_to_images(W, vpix=MNIST_VPIX+1, hpix=MNIST_HPIX, pad_nan=True)
-    else:
-        img_list = rows_to_images(W, vpix=MNIST_VPIX, hpix=MNIST_HPIX, drop_last=MNIST_CLASSES)
-    grid = images_to_grid(img_list, vpad=1, hpad=1)
+    if vmin is None and vmax is None and cmap == 'RdBu_r':
+        vmax = np.nanmax(np.abs(grid))
+        vmin = -vmax
+    im = ax.imshow(grid, cmap=cmap, vmin=vmin, vmax=vmax)
 
-    v = np.nanmax(np.abs(grid)) if not v else v
-    im = ax.imshow(grid, cmap='RdBu_r', vmin=-v, vmax=v)
-    if add_cbar:
+    if cbar:
         divider = make_axes_locatable(ax)
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax)
+
     ax.axis('off')
+    ax.set_title(title)
+
+
+
+def plot_data_batch(inputs, targets, ax=None):
+    fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
+    vmin = min(inputs.min(), targets.min())
+    vmax = min(inputs.max(), targets.max())
+    _plot_rows(inputs, ax=axs[0], title='Inputs', cmap=None, vmin=vmin, vmax=vmax, cbar=False)
+    _plot_rows(targets, ax=axs[1], title='Targets', cmap=None, vmin=vmin, vmax=vmax)
+    scale_fig(fig, 1.5)
+    fig.tight_layout()
+    return axs
+
+
+def plot_weights(net=None, _W=None, W=None, ax=None):
+    if net is not None:
+        assert _W is None and W is None, 'Do not provide weight matrix if passing in net object'
+        _W = net._W
+        if net.normalize_weight:
+            W = net.W
+
+    if W is not None:
+        fig, ax = prep_axes(ax,1,2, sharex=True, sharey=True)
+        _plot_rows(_W, ax=ax[0], title='_W (raw)')
+        _plot_rows(W, ax=ax[1], title='W (normalized)')
+        scale_fig(fig, 1.5)
+    else:
+        fig, ax = prep_axes(ax)
+        _plot_rows(_W, title='Raw (no normalization)', ax=ax)
+    fig.tight_layout()
 
     return ax
 
@@ -111,6 +120,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=T
             a.set_xticklabels(list(range(n_classes))+[None])
 
     return ax
+
 
 def _plot_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, legend='auto', ax=None):
     """Plots the evolution of <var> as dynamics progresses over time <steps>"""
