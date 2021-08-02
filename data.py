@@ -174,11 +174,17 @@ class AssociativeDataset(Dataset):
         elif self.perturb_mode in ['first', 'last']:
             #TODO: only need to compute perturb_mask once in this case, and can directly store
             #inputs as perturbed targets instead of perturbing on-the-fly
-            perturb_mask = torch.zeros(datapoint.shape, dtype=bool)
+            perturb_mask = torch.zeros_like(datapoint, dtype=bool)
             if self.perturb_mode == 'first':
-                perturb_mask[:self.perturb_num] = 1
+                if len(datapoint.shape)==3: #[B,M,1]
+                    perturb_mask[:,:self.perturb_num] = 1
+                elif len(datapoint.shape)==2: #[M,1]
+                    perturb_mask[:self.perturb_num] = 1
             elif self.perturb_mode == 'last':
-                perturb_mask[-self.perturb_num:] = 1
+                if len(datapoint.shape)==3: #[B,M,1]
+                    perturb_mask[:,-self.perturb_num:] = 1
+                elif len(datapoint.shape)==2: #[M,1]
+                    perturb_mask[-self.perturb_num:] = 1
 
         #perturb_value indicates what the perturbed entries will be set to
         if self.perturb_value == 'rand':
@@ -192,9 +198,9 @@ class AssociativeDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        input, target = self.dataset[idx] #Md, Mc
+        input, target = self.dataset[idx] #[len(idx),Md,1], [len(idx),Mc,1] or [Md,1], [Mc,1]
         if self.classify:
-            target = torch.cat((input, target)) #M=Md+Mc, else M=Md
+            target = torch.cat((input, target), dim=-2) #M=Md+Mc, else M=Md
         else:
             target = input
         input, perturb_mask = self._perturb(target) #entries input[perturb_mask] are perturbed

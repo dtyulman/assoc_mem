@@ -31,7 +31,7 @@ def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
 
 
 def plot_data_batch(inputs, targets, ax=None):
-    fig, axs = prep_axes(ax,1,2)
+    fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
 
     inputs_list = rows_to_images(inputs.squeeze(), pad_nan=True)
     targets_list = rows_to_images(targets.squeeze(), pad_nan=True)
@@ -47,6 +47,8 @@ def plot_data_batch(inputs, targets, ax=None):
         fig.colorbar(im, cax=cax)
         ax.axis('off')
         ax.set_title(title)
+
+    return axs
 
 
 def plot_weights_mnist(W, max_n_rows=1024, plot_class=False, v=None, add_cbar=True, ax=None):
@@ -82,7 +84,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=T
     fig, ax = prep_axes(ax,2,1)
 
     key = 'f' if apply_nonlin else 'h'
-    h = state_debug_history[-1][key].detach() #[B,N,1]
+    h = state_debug_history[-1][key].detach().to('cpu') #[B,N,1]
     assert len(h.shape)==3, 'Hidden activity must have three dimensions: [B,N,1]'
     max_h_value, max_h_idx = torch.max(h.squeeze(), dim=1) #[B,N]-->([B],[B])
 
@@ -108,6 +110,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=T
             a.set_xticks(xticks+n_per_class/2)
             a.set_xticklabels(list(range(n_classes))+[None])
 
+    return ax
 
 def _plot_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, legend='auto', ax=None):
     """Plots the evolution of <var> as dynamics progresses over time <steps>"""
@@ -289,7 +292,7 @@ def prep_axes(ax=None, nrows=1, ncols=1, **kwargs):
     if ax is None:
         fig, ax = plt.subplots(nrows, ncols, **kwargs)
     else:
-        if ncols>1 or nrows>1:
+        if ncols>1 or nrows>1: #sanity check if specifying nrows or ncols
             assert len(ax.flatten()) == nrows*ncols
         fig = ax.get_figure()
     return fig, ax
