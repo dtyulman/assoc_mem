@@ -127,3 +127,9 @@ def verify_config(config, mode='raise'):
             }
 
     return verify_items(config, constraint)
+
+
+def load_config(path):
+    with open(path, 'r') as f:
+        config = eval(f.read())
+    return config

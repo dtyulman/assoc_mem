@@ -9,7 +9,7 @@ from torch import nn
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
     def __init__(self, input_size, hidden_size, beta=None, tau=None, normalize_weight=False,
-                 normalize_input=False, input_mode='init', num_steps=None, dt=1,
+                 dropout=False, normalize_input=False, input_mode='init', num_steps=None, dt=1,
                  fp_thres=0.001, fp_mode='iter', **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
@@ -24,6 +24,8 @@ class ModernHopfield(nn.Module):
         assert normalize_weight in [True, False]
         self.normalize_weight = normalize_weight
         self._maybe_normalize_weight()
+        assert 0 < dropout < 1 or dropout is False
+        self.dropout = dropout #only applies if net in in 'training' mode
 
         self.beta = nn.Parameter(torch.tensor(beta or 1.), requires_grad=(beta is None))
         self.tau = nn.Parameter(torch.tensor(tau or 1.), requires_grad=(tau is None))
@@ -59,7 +61,6 @@ class ModernHopfield(nn.Module):
         state = torch.zeros_like(input)
         external_current = torch.zeros_like(input)
         clamp_values = None
-
         if 'init' in self.input_mode:
             state = input
         if 'cont' in self.input_mode:
@@ -67,7 +68,17 @@ class ModernHopfield(nn.Module):
         if 'clamp' in self.input_mode:
             clamp_values = input[clamp_mask]
 
+        if self.training and self.dropout:
+            batch_size, input_size, _ = input.shape #[B,M,1]
+            self.dropout_mask = torch.rand(batch_size, self.hidden_size, 1) < self.dropout #[B.N,1]
+
         return state, external_current, clamp_values
+
+
+    def _maybe_dropout(self, f):
+        if self.training and self.dropout:
+            f[self.dropout_mask] = 0
+        return f
 
 
     def forward(self, input, clamp_mask=None, debug=False):
@@ -136,7 +147,7 @@ class ModernHopfield(nn.Module):
         Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + X*softmax(X^T*v(t))]
         """
         h = self.W @ self._g(v) #[N,M],[B,M,1]->[B,N,1]
-        f = self._f(h) #[B,N,1]
+        f = self._maybe_dropout(self._f(h)) #[B,N,1]
         v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
         state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
         #     = (1-dt/tau)*v + (dt/tau)*v_instant

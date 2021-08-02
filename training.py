@@ -1,5 +1,7 @@
+#built-in
 import warnings, time
 
+#third party
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
@@ -7,11 +9,14 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+#custom
+import plots, data
+
 
 class AssociativeTrain():
     def __init__(self, net, train_loader, test_loader=None, lr=0.001, lr_decay=1.,
-                 loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0',
-                 logger=None, logdir=None, print_every=100, sparse_logging_factor=10, **kwargs):
+                 loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0', reg_loss=None,
+                 logger=None, logdir=None, print_every=100, sparse_log_factor=10, **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
             warnings.warn(f'Ignoring unused AssociativeTrain kwargs: {kwargs}')
@@ -26,12 +31,13 @@ class AssociativeTrain():
 
         self._set_loss_mode(loss_mode, loss_fn)
         self._set_acc_mode(acc_mode, acc_fn)
+        self.reg_loss = reg_loss
 
         self.lr = lr
         self.lr_decay = lr_decay
 
         self.print_every = print_every
-        self.sparse_logging_factor = sparse_logging_factor
+        self.sparse_log_factor = sparse_log_factor
 
         if logger is None:
             self.logger = Logger(logdir)
@@ -70,6 +76,8 @@ class AssociativeTrain():
 
     def __call__(self, epochs=10, label=''):
         self.set_device()
+
+        self.net.train() #put net in 'training' mode e.g. enable dropout if applicable
         with Timer(f'{self.__class__.__name__}' + (f', {label}' if label else '')):
             for _ in range(epochs):
                 self.logger.epoch += 1
@@ -86,6 +94,7 @@ class AssociativeTrain():
 
                 if self.lr_decay:
                     self.lr *= self.lr_decay
+        self.net.eval() #put net back in 'evaluation' mode e.g. disable dropout
 
         return self.logger
 
@@ -104,7 +113,12 @@ class AssociativeTrain():
         if self.loss_mode == 'class':
             output = output[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
             target = target[:, -self.n_class_units:]  # [B,M,1]->[B,Mc,1]
-        return self.loss_fn(output, target)
+        loss = self.loss_fn(output, target)
+
+        if self.reg_loss is not None:
+            loss = loss + self.reg_loss()
+
+        return loss
 
 
     def compute_acc(self, output, target):
@@ -123,7 +137,9 @@ class AssociativeTrain():
                   train_loss=None, train_acc=None):
 
         if self.logger.iteration % self.print_every == 0:
-            #training loss/acc
+            self.net.eval()
+
+            #training loss/acc, compute if needed
             if train_loss is None or train_acc is None:
                 assert (input is not None and target is not None and output is     None) or \
                        (input is     None and target is not None and output is not None) or \
@@ -166,9 +182,20 @@ class AssociativeTrain():
                     self.logger(f'params/{param_name}_mean', param_value.mean())
                     self.logger(f'params/{param_name}_std', param_value.std())
 
-                    if self.logger.iteration % (self.sparse_logging_factor*self.print_every) == 0:
-                        #log full parameter more sparsely to save space
-                        self.logger.add_image('W', self.net._W, global_step=self.logger.iteration, dataformats='HW')
+            #log plots/images more sparsely to save space
+            if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
+                fig = plots.plot_weights_mnist(self.net.W, plot_class=True).get_figure()
+                self.logger.add_figure('W', fig, global_step=self.logger.iteration)
+
+
+                debug_batch = data.get_aa_debug_batch(self.train_loader.dataset,
+                                                      n_per_class=10)
+                debug_input, debug_target, debug_clamp_mask = self._prep_data(*debug_batch)
+                state_debug_history = self.net(debug_input, clamp_mask=debug_clamp_mask, debug=True)
+                fig = plots.plot_hidden_max_argmax(state_debug_history, n_per_class=10)[0].get_figure()
+                self.logger.add_figure('hidden', fig, global_step=self.logger.iteration)
+
+            self.net.train()
             print(log_str)
 
 
@@ -191,16 +218,20 @@ class SGDTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, lr=0.1, momentum=0, **kwargs):
+    def __init__(self, net, train_loader, test_loader=None, momentum=False, clip=False,
+                 rescale_grad=False, beta_decay=False, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
-        #modified default lr
-        super().__init__(net, train_loader, test_loader, lr=lr, **kwargs)
+        super().__init__(net, train_loader, test_loader, **kwargs)
         self.name = 'FPT'
         assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
         self.verify_grad = False #for sanity-checking dLdW against non-batched version
 
         self.momentum = momentum #https://distill.pub/2017/momentum/
         self.grad_avg = 0
+
+        self.clip = clip
+        self.rescale_grad = rescale_grad
+        self.beta_decay = beta_decay
 
 
     @torch.no_grad()
@@ -223,11 +254,22 @@ class FPTrain(AssociativeTrain):
         else:
             dLd_W = dLdW
 
-        if self.momentum > 0:
-            dLd_W = dLd_W + self.momentum*self.grad_avg
-            self.grad_avg = dLd_W
+        if self.momentum:
+            self.grad_avg = dLd_W + self.momentum*self.grad_avg
+            dLd_W = self.grad_avg
+        if self.clip:
+            norm = dLd_W.norm()
+            if norm > self.clip:
+                dLd_W = self.clip*dLd_W/norm
+        if self.rescale_grad:
+            dLd_W = dLd_W/dLd_W.max(dim=1, keepdim=True)[0]
+        if self.reg_loss is not None:
+            dLd_W -= self.reg_loss.grad()['_W']
 
         self.net._W -= self.lr * dLd_W
+        if self.beta_decay:
+            self.net.beta *= self.beta_decay
+
         self.logger('train/grad_norm', dLd_W.norm())
 
 
@@ -369,13 +411,34 @@ class Logger(SummaryWriter):
 
 
 
+class L2Reg(nn.Module):
+    def __init__(self, params, reg_rate=1, scale_by_size=False):
+        """Params is a dict e.g. dict(net.named_parameters()) or subset of named_parameters()"""
+        assert type(params) == dict
+        self.reg_rate = reg_rate
+        if scale_by_size:
+            self.num_params = sum([param.numel() for param in params.values()])
+            self.reg_rate = self.reg_rate/self.num_params
+        self.params = params
+
+    def __call__(self):
+        params_norm = sum([param.norm() for param in self.params.values()])
+        reg_loss = self.reg_rate/2 * params_norm
+        return reg_loss
+
+    def grad(self): #only used for FPTrain where I'm computing gradient manually
+        return {name: self.reg_rate*param for name, param in self.params.items()}
+
+
 def classifier_acc(output, target):
     output_class = torch.argmax(output, dim=1)
     target_class = torch.argmax(target, dim=1)
     return l0_acc(output_class, target_class)
 
+
 def l0_acc(output, target):
     return (output == target).float().mean()
+
 
 def l1_acc(output, target):
     return 1 - F.l1_loss(output, target)

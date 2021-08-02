@@ -1,5 +1,6 @@
 import os, glob, datetime, gc
-import torch, joblib
+import torch, joblib, pynvml
+
 
 def initialize_savedir(baseconfig):
     # TODO: folder structure should be
@@ -26,6 +27,23 @@ def initialize_savedir(baseconfig):
         f.write(repr(baseconfig)+'\n')
     print(f'Saving to: {savedir}')
     return savedir
+
+
+def choose_device(dev_str):
+    """If dev_str is 'cuda', returns 'cuda:X' where X is the gpu with the most free memory.
+    """
+    if dev_str == 'cuda':
+        best_dev_idx = 0
+        best_mem_free = 0
+        pynvml.nvmlInit()
+        for i in range(torch.cuda.device_count()):
+            device = pynvml.nvmlDeviceGetHandleByIndex(i)
+            mem_free = pynvml.nvmlDeviceGetMemoryInfo(device).free
+            if mem_free > best_mem_free:
+                best_mem_free = mem_free
+                best_dev_idx = i
+        dev_str = f'cuda:{best_dev_idx}'
+    return dev_str
 
 
 def load_from_dir(savedir):

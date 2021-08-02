@@ -1,9 +1,11 @@
+#built-in
 import os
 from copy import deepcopy
 
 #third-party
 import torch, joblib
 
+#custom
 import utils, data, training, networks
 import configs as cfg
 
@@ -15,28 +17,38 @@ if os.path.abspath('.').find('dtyulman') > -1:
 train_config = cfg.Config({
     'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
-    'lr': 1,
-    'lr_decay': 1,
-    'momentum': 0.999,
-    'print_every': 10,
+
+    'lr': 0.0001,
+    'lr_decay': 1.,
+    'momentum': 0.99,
+    'clip': False,
+    'rescale_grad': True,
+    'beta_decay': False, #1.00035,
+
     'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'class', #full, class
     'acc_fn' : 'cls', #cls, L0, L1/mae
+    'reg_fn': None, #L2, None
+    'reg_rate': None,
+
     'epochs': 500,
+    'print_every': 10,
+    'sparse_log_factor': 1,
     'device': 'cuda', #cuda, cpu
     })
 
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 100,
+    'hidden_size': 50,
     'normalize_weight': True,
-    'beta': 10,
-    'tau': 1,
+    'dropout': False,
+    'beta': 20.,
+    'tau': 1.,
     'normalize_input': False,
-    'input_mode': 'clamp', #init, cont, init+cont, clamp
-    'dt': 0.05,
+    'input_mode': 'init', #init, cont, init+cont, clamp
+    'dt': 0.1,
     'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
@@ -47,7 +59,7 @@ data_values_config = cfg.Config({
     'include_test': False,
     'normalize' : 'data+targets', #data, data+targets, False
     'num_samples': 50, #if None takes entire MNISTDataset
-    'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
+    'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
     'crop': False,
@@ -66,26 +78,31 @@ data_mode_config = cfg.Config({
     'perturb_value': 'min', #min, max, rand, <float>
     })
 
-#%%
+
+#be careful with in-place ops!
 baseconfig = cfg.Config({
     'train': deepcopy(train_config),
     'net': deepcopy(net_config),
     'data': {'values': deepcopy(data_values_config),
              'mode': deepcopy(data_mode_config)},
-    }) #be careful with in-place ops!
+    })
 
+
+# baseconfig = cfg.load_config('./results/2021-07-27/proof_of_principle/baseconfig.txt')
+# baseconfig['train.loss_mode'] = 'class'
+
+#%%
 # deltaconfigs = {'net.num_steps': [1, 1000],
 #                 'train.loss_mode': ['full', 'class'],
 #                 'net.input_mode': ['init', 'cont', 'init+cont'],
 #                 }
 deltaconfigs = {}
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
-
-#%%
 saveroot = utils.initialize_savedir(baseconfig)
 
 for config, label in zip(configs, labels):
     cfg.verify_config(config)
+    print(config)
     savedir = os.path.join(saveroot, label)
 
     #data
@@ -96,9 +113,15 @@ for config, label in zip(configs, labels):
         config['net']['input_size'] = train_data[0][0].numel()
     NetClass = getattr(networks, config['net'].pop('class'))
     net = NetClass(**config['net'])
+    # with torch.no_grad():
+    #     net._W += train_data[:][0].mean(dim=0).tile(1,net.hidden_size).T
+    #     net._maybe_normalize_weight()
+    with torch.no_grad():
+        net._W.data = deepcopy(train_data[:][1].squeeze())
+
 
     #training
-    device = config['train'].pop('device')
+    device = utils.choose_device(config['train'].pop('device'))
     epochs = config['train'].pop('epochs')
     batch_size = config['train'].pop('batch_size')
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -109,8 +132,18 @@ for config, label in zip(configs, labels):
             test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
         else:
             test_loader = None
+
+    reg_fn = config['train'].pop('reg_fn')
+    if reg_fn == 'L2':
+        reg_loss = training.L2Reg({'_W': net._W}, reg_rate=config['train'].pop('reg_rate'))
+    elif reg_fn is None:
+        reg_loss = None
+    else:
+        raise ValueError(f"Invalid reg_fn: '{reg_fn}'")
+
     TrainerClass = getattr(training, config['train'].pop('class'))
-    trainer = TrainerClass(net, train_loader, test_loader, logdir=savedir, **config['train'])
+    trainer = TrainerClass(net, train_loader, test_loader, reg_loss=reg_loss, logdir=savedir,
+                           **config['train'])
 
     #go
     net.to(device)
@@ -165,7 +198,7 @@ fig.tight_layout()
 
 
 #%%
-n_per_class = 4
+n_per_class = None
 debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 plots.plot_data_batch(debug_input, debug_target)
 
