@@ -1,5 +1,6 @@
 #built-in
 import warnings, time
+from copy import deepcopy
 
 #third party
 import matplotlib.pyplot as plt
@@ -14,7 +15,7 @@ import plots, data
 
 
 class AssociativeTrain():
-    def __init__(self, net, train_loader, test_loader=None, lr=0.001, lr_decay=1.,
+    def __init__(self, net, train_loader, test_loader=None, optimizer=None,
                  loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0', reg_loss=None,
                  logger=None, logdir=None, print_every=100, sparse_log_factor=10, **kwargs):
         if kwargs:
@@ -29,12 +30,11 @@ class AssociativeTrain():
         self.test_loader = test_loader
         self.n_class_units = train_loader.dataset.dataset.num_classes #Mc
 
+        self.optimizer = torch.optim.Adam(net.parameters()) if optimizer is None else optimizer
+
         self._set_loss_mode(loss_mode, loss_fn)
         self._set_acc_mode(acc_mode, acc_fn)
         self.reg_loss = reg_loss
-
-        self.lr = lr
-        self.lr_decay = lr_decay
 
         self.print_every = print_every
         self.sparse_log_factor = sparse_log_factor
@@ -76,7 +76,6 @@ class AssociativeTrain():
 
     def __call__(self, epochs=10, label=''):
         self.set_device()
-
         self.net.train() #put net in 'training' mode e.g. enable dropout if applicable
         with Timer(f'{self.__class__.__name__}' + (f', {label}' if label else '')):
             for _ in range(epochs):
@@ -92,8 +91,6 @@ class AssociativeTrain():
                     #not the loss which caused the update
                     self.write_log(output=output, target=target)
 
-                if self.lr_decay:
-                    self.lr *= self.lr_decay
         self.net.eval() #put net back in 'evaluation' mode e.g. disable dropout
 
         return self.logger
@@ -203,7 +200,6 @@ class SGDTrain(AssociativeTrain):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
         self.name = 'SGD'
-        self.optimizer = torch.optim.Adam(net.parameters(), lr=self.lr)
 
 
     def _update_parameters(self, output, target):
@@ -216,28 +212,12 @@ class SGDTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, momentum=False, rescale_grad=False,
-                 clip_mode=False, clip_thres=0, beta_increment=False, beta_increment_epochs=0,
-                 **kwargs):
+    def __init__(self, net, train_loader, test_loader=None, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
         self.name = 'FPT'
         assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
         self.verify_grad = False #for sanity-checking dLdW against non-batched version
-
-        #https://distill.pub/2017/momentum/
-        self.momentum = momentum
-        self.grad_avg = 0
-
-        #https://neptune.ai/blog/understanding-gradient-clipping-and-how-it-can-fix-exploding-gradients-problem
-        assert clip_mode in ['norm', 'value', None]
-        self.clip_mode = clip_mode
-        self.clip_thres = clip_thres
-
-        self.rescale_grad = rescale_grad
-
-        self.beta_increment = beta_increment
-        self.beta_increment_epochs = beta_increment_epochs
 
 
     @torch.no_grad()
@@ -246,42 +226,39 @@ class FPTrain(AssociativeTrain):
 
 
     def _update_parameters(self, output, target):
-        dLdW = self.compute_dLdW(output, target) #TODO: put into W.grad?
+        #TODO: https://pytorch.org/docs/stable/notes/extending.html
+        self.compute_gradients(output, target)
+        self.optimizer.step()
 
-        if self.verify_grad:
-            dLdW_nb = self.compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0))
-            assert (dLdW-dLdW_nb).abs().mean() < 1e-10, 'Error in dLdW calculation!'
 
+    def compute_gradients(self, output, target):
+        dLdW = self.compute_dLdW(output, target)
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
-            dLd_W = dLdW / Z - self.net._W * (S / Z**3)
+            self.net._W.grad = dLdW / Z - self.net._W * (S / Z**3)
         else:
-            dLd_W = dLdW
+            self.net._W.grad = dLdW
 
-        if self.momentum:
-            self.grad_avg = dLd_W + self.momentum*self.grad_avg
-            dLd_W = self.grad_avg
-        if self.clip_mode == 'norm':
-            norm = dLd_W.norm()
-            if norm > self.clip_thres:
-                dLd_W = self.clip_thres*dLd_W/norm
-        elif self.clip_mode == 'value':
-            dLd_W[dLd_W > self.clip_thres] = self.clip_thres
-            dLd_W[dLd_W < -self.clip_thres] = -self.clip_thres
-
-        if self.rescale_grad:
-            dLd_W = dLd_W/dLd_W.max(dim=1, keepdim=True)[0]
         if self.reg_loss is not None:
-            dLd_W -= self.reg_loss.grad()['_W']
+            self.net._W.grad -= self.reg_loss.grad()['_W']
 
-        self.net._W -= self.lr * dLd_W
-        if self.beta_increment and self.logger.epoch < self.beta_increment_epochs:
-            self.net.beta += self.beta_increment
+        if self.net.beta.requires_grad:
+            self.net.beta.grad = self.compute_dLdB(output, target)
 
+            # dLdW_nb = self.compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0))
+            # assert (dLdW-dLdW_nb).abs().mean() < 1e-10, 'Error in dLdW calculation!'
+
+        self.write_gradients_log(self.net._W.grad, dLdW, self.net.beta.grad)
+
+
+    def write_gradients_log(self, dLd_W=None, dLdW=None, dLdB=None):
         if self.logger.iteration % self.print_every == 0:
-            self.logger('train/grad_norm', dLd_W.norm())
+            self.logger('train/grad_norm', self.net._W.grad.norm())
+            if dLdB is not None:
+                self.logger('train/dLdB', dLdB)
+
         if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
             if self.net.normalize_weight:
                 axs = plots.plot_weights(_W=dLd_W, W=dLdW)
@@ -301,36 +278,45 @@ class FPTrain(AssociativeTrain):
             MSE loss, L = 1/2B sum_i sum_b (v_i - t_i)^2, where B is batch size
         """
         N,M = self.net.W.shape
-        g = v  # [B,M,1]
-        h = self.net.W@g  # [N,M]@[B,M,1] --> [B,N,1]
-        f = F.softmax(self.net.beta*h, dim=1)  # [B,N,1]
+        g = self.net._g(v)  # [B,M,1]
+        h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
+        f = self.net._f(h)  # [B,N,1]
+        del h
 
         if self.loss_mode == 'class':
             e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
         else:
             e = v-t #[B,M,1]
-        del h, v, t  # free up memory
+        del v, t  # free up memory
 
-        # ([B,N,N]-[B,N,1]@[B,1,N])@[N,M] --> [B,N,M]
+        # ([B,N,N]-[B,N,1]@[B,1,N])@[N,M] -> [B,N,M]
         bFFW = self.net.beta * (f.squeeze().diag_embed() - f @ f.transpose(1, 2)) @ self.net.W
-        A = torch.eye(M, device=self.device) - self.net.W.t() @ bFFW  # [M,M]+[M,N]@[B,N,M] --> [B,M,M]
+        A = torch.eye(M, device=self.device) - self.net.W.t() @ bFFW  # [M,M]+[M,N]@[B,N,M] -> [B,M,M]
 
         if self.loss_mode == 'class': # only compute loss over the last Mc units, M=Md+Mc
             Ainv = torch.linalg.inv(A)  # [B,M,M]
-            a = Ainv[:, -self.n_class_units:].transpose(1, 2) @ e #[B,M,Mc]@[B,Mc,1]--> [B,M,1]
+            a = Ainv[:, -self.n_class_units:].transpose(1, 2) @ e #[B,M,Mc]@[B,Mc,1] -> [B,M,1]
             del Ainv
         else:
             # a = A^(-1)^T * e <=> a = A^(-1) * e  b/c A and A^(-1) symmetric for g(x)=x
-            a = torch.linalg.solve(A.transpose(1, 2), e)  # [B,M,M],[B,M,1] --> [B,M,1]
+            a = torch.linalg.solve(A.transpose(1, 2), e)  # [B,M,M],[B,M,1] -> [B,M,1]
         del A, e
 
-        # dLdW = f @ a.transpose(1,2) + bFFW @ a @ g.transpose(1,2) #[B,N,1]@[B,1,Mc]+[B,N,M]@[B,M,1]@[B,1,M] --> [B,N,M]
-        dLdW = bFFW @ a @ g.transpose(1, 2);
-        del bFFW, g
-        dLdW = dLdW + f @ a.transpose(1, 2)
-        del f, a
-
+        #[B,N,1]@[B,1,Mc]+[B,N,M]@[B,M,1]@[B,1,M] -> [B,N,M]
+        dLdW = f @ a.transpose(1,2) + bFFW @ a @ g.transpose(1,2)
+        del f, a, bFFW, g
         return dLdW.mean(dim=0)
+
+
+    def compute_dLdB(self, v, t):
+        g = self.net._g(v)  # [B,M,1]
+        h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
+        f = self.net._f(h)  # [B,N,1]
+
+        dfdB = f * (h - h.transpose(1,2)@f) #[B,N,1]
+        dvdB = self.net.W.t() @ dfdB #[M,N]@[B,N,1] -> [B,M,1]
+        dLdB = (v-t).transpose(1,2) @ dvdB #[B,1,1]
+        return dLdB.mean(0).squeeze()
 
 
     def compute_dLdW_nobatch(self, v, t): #for debugging
@@ -345,6 +331,42 @@ class FPTrain(AssociativeTrain):
         a = A_inv[:, -self.n_class_units:] @ (v-t)[-self.n_class_units:]
         dLdW = f@ a.T + bFFW @ a @ v.T
         return dLdW
+
+
+    def numerical_dLdW(self, input, target, eps=1e-6):
+        _W_flat = self.net._W.flatten() #reference
+        dLd_W = torch.empty_like(_W_flat)
+        for i,w in enumerate(_W_flat):
+            _W_flat[i] = w + eps
+            output = self.net(input)
+            loss_plus = self.compute_loss(output, target)
+            _W_flat[i] = w
+
+            _W_flat[i] = w - eps
+            output = self.net(input)
+            loss_minus = self.compute_loss(output, target)
+            _W_flat[i] = w
+
+            dLd_W[i] = loss_plus - loss_minus
+        dLd_W = dLd_W.reshape(self.net._W.shape)/(2*eps)
+        return dLd_W
+
+
+    def numerical_dLdB(self, input, target, eps=1e-6):
+        beta = deepcopy(self.net.beta)
+
+        self.net.beta = beta + eps
+        output = self.net(input)
+        loss_plus = self.compute_loss(output, target)
+        self.net.beta = beta
+
+        self.net.beta = beta - eps
+        output = self.net(input)
+        loss_minus = self.compute_loss(output, target)
+        self.net.beta = beta
+
+        dLdB = (loss_plus - loss_minus)/(2*eps)
+        return dLdB
 
 
 ###########
@@ -365,6 +387,66 @@ class Timer():
         elapsed_str = 'Time elapsed{}: {} sec'.format(details_str, elapsed)
         print(elapsed_str)
 
+
+class CustomOpt():
+    #TODO: inherit from torch.optim.Optimizer
+    def __init__(self, net, lr=1., lr_decay=1., momentum=False, rescale_grad=False,
+                 clip=False, clip_thres=None, beta_increment=False, beta_max=None, **kwargs):
+        if kwargs:
+            #kwargs ignores any extra values passed in (eg. via a Config object)
+            warnings.warn(f'Ignoring unused FPTOptimizer kwargs: {kwargs}')
+
+        self.net = net
+
+        self.lr = lr
+        self.lr_decay = lr_decay
+
+        #https://distill.pub/2017/momentum/
+        self.momentum = momentum
+        self.grad_avg = 0
+
+        #https://neptune.ai/blog/understanding-gradient-clipping-and-how-it-can-fix-exploding-gradients-problem
+        assert clip in ['norm', 'value', False]
+        self.clip = clip
+        self.clip_thres = clip_thres
+
+        self.rescale_grad = rescale_grad
+
+        self.beta_increment = beta_increment
+        self.beta_max = beta_max
+
+
+    def step(self):
+        #update _W
+        dLd_W = self.net._W.grad
+
+        if self.momentum:
+            self.grad_avg = dLd_W + self.momentum*self.grad_avg
+            dLd_W = self.grad_avg
+
+        if self.clip == 'norm':
+            norm = dLd_W.norm()
+            if norm > self.clip_thres:
+                dLd_W = self.clip_thres*dLd_W/norm
+        elif self.clip == 'value':
+            dLd_W[dLd_W > self.clip_thres] = self.clip_thres
+            dLd_W[dLd_W < -self.clip_thres] = -self.clip_thres
+
+        if self.rescale_grad:
+            dLd_W = dLd_W/dLd_W.max(dim=1, keepdim=True)[0]
+
+        self.net._W -= self.lr * dLd_W
+
+        #update beta
+        if self.beta_increment and self.net.beta < self.beta_max:
+            self.net.beta += self.beta_increment
+
+        if self.net.beta.requires_grad:
+            self.net.beta -= self.lr * self.net.beta.grad
+
+        #learning rate
+        if self.lr_decay:
+            self.lr *= self.lr_decay
 
 
 class Logger(SummaryWriter):

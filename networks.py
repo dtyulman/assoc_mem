@@ -8,9 +8,9 @@ from torch import nn
 
 class ModernHopfield(nn.Module):
     """Ramsauer et al 2020"""
-    def __init__(self, input_size, hidden_size, beta=None, tau=None, normalize_weight=False,
-                 dropout=False, normalize_input=False, input_mode='init', num_steps=None, dt=1,
-                 fp_thres=0.001, fp_mode='iter', **kwargs):
+    def __init__(self, input_size, hidden_size, beta=10., train_beta=False, tau=1.,
+                 normalize_weight=False, dropout=False, normalize_input=False, input_mode='init',
+                 num_steps=None, dt=1., fp_thres=0.001, fp_mode='iter', **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
             warnings.warn(f'Ignoring unused ModernHopfield kwargs: {kwargs}')
@@ -27,8 +27,8 @@ class ModernHopfield(nn.Module):
         assert 0 < dropout < 1 or dropout is False
         self.dropout = dropout #only applies if net in in 'training' mode
 
-        self.beta = nn.Parameter(torch.tensor(beta or 1.), requires_grad=(beta is None))
-        self.tau = nn.Parameter(torch.tensor(tau or 1.), requires_grad=(tau is None))
+        self.beta = nn.Parameter(torch.tensor(beta), requires_grad=train_beta)
+        self.tau = torch.tensor(tau)
 
         assert dt<=1, 'Step size dt should be <=1'
         self.dt = dt

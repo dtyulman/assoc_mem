@@ -18,16 +18,20 @@ train_config = cfg.Config({
     'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 50,
 
-    'lr': 1,
-    'lr_decay': 1.,
-    'momentum': 0.9,
-    'clip_mode': False, #norm, value, None
-    'clip_thres': 1,
-    'rescale_grad': False,
-    'beta_increment': 1,
-    'beta_increment_epochs': 49,
+    'optim': {'class': 'CustomOpt', #CustomOpt, Adam
+              'lr': 1.,
 
-    'loss_mode': 'class', #full, class
+              #CustomOpt only
+              'lr_decay': 1.,
+              'momentum': 0.999, #float,False
+              'clip': False, #norm, value, False
+              'clip_thres': None, #float, None
+              'rescale_grad': False, #True, False
+              'beta_increment': False, #int, False
+              'beta_max': None, #float, None
+              },
+
+    'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'class', #full, class
     'acc_fn' : 'cls', #cls, L0, L1/mae
@@ -40,18 +44,20 @@ train_config = cfg.Config({
     'device': 'cuda', #cuda, cpu
     })
 
+
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 50,
+    'hidden_size': 100,
     'init': 'random', #random, data_mean, inputs, targets
     'normalize_weight': True,
     'dropout': False,
     'beta': 10.,
+    'train_beta': False,
     'tau': 1.,
     'normalize_input': False,
     'input_mode': 'clamp', #init, cont, init+cont, clamp
-    'dt': 0.1,
+    'dt': 0.05,
     'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
@@ -61,8 +67,8 @@ data_values_config = cfg.Config({
     'class': 'MNISTDataset', #MNISTDataset, RandomDataset
     'include_test': False,
     'normalize' : 'data+targets', #data, data+targets, False
-    'num_samples': 50, #if None takes entire MNISTDataset
-    'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
+    'num_samples': 50, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
     'crop': False,
@@ -95,9 +101,9 @@ baseconfig = cfg.Config({
 # baseconfig['train.loss_mode'] = 'class'
 
 #%%
-# deltaconfigs = {'net.num_steps': [1, 1000],
-#                 'train.loss_mode': ['full', 'class'],
-#                 'net.input_mode': ['init', 'cont', 'init+cont'],
+# deltaconfigs = {'data.values.balanced': [True, False],
+#                 'net.input_mode': ['init', 'clamp'],
+#                 'net.beta': [10, 50]
 #                 }
 deltaconfigs = {}
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
@@ -155,9 +161,16 @@ for config, label in zip(configs, labels):
     else:
         raise ValueError(f"Invalid reg_fn: '{reg_fn}'")
 
+    optim_config = config['train'].pop('optim')
+    optim_class = optim_config.pop('class')
+    if optim_class == 'Adam':
+        optimizer = torch.optim.Adam(net.parameters(), lr=optim_config.pop('lr'))
+    elif optim_class == 'CustomOpt':
+        optimizer = training.CustomOpt(net, **optim_config)
+
     TrainerClass = getattr(training, config['train'].pop('class'))
-    trainer = TrainerClass(net, train_loader, test_loader, reg_loss=reg_loss, logdir=savedir,
-                           **config['train'])
+    trainer = TrainerClass(net, train_loader, test_loader, optimizer=optimizer, reg_loss=reg_loss,
+                           logdir=savedir, **config['train'])
 
     #go
     net.to(device)
