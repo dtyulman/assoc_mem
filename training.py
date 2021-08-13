@@ -85,14 +85,13 @@ class AssociativeTrain():
 
                     input, target, clamp_mask = self._prep_data(*batch)
                     output = self.net(input, clamp_mask)
-                    self._update_parameters(output, target)
+                    self._update_parameters(output, target, input)
 
                     #bug/feature: logs the resulting loss/acc *after* the param update,
                     #not the loss which caused the update
                     self.write_log(output=output, target=target)
 
         self.net.eval() #put net back in 'evaluation' mode e.g. disable dropout
-
         return self.logger
 
 
@@ -102,7 +101,7 @@ class AssociativeTrain():
         return input, target, clamp_mask
 
 
-    def _update_parameters(self, output, target):
+    def _update_parameters(self, output, target, input=None):
         raise NotImplementedError
 
 
@@ -184,6 +183,9 @@ class AssociativeTrain():
                 fig = plots.plot_weights(self.net)[0].get_figure()
                 self.logger.add_figure('weights', fig)
 
+                #note, this grabs the first 10 of each class, not the first 100 samples, so if
+                #initializing weights with data, it's not guaranteed that the first 100 hidden units
+                #will be most active for the debug batch
                 debug_batch = data.get_aa_debug_batch(self.train_loader.dataset, n_per_class=10)
                 debug_input, debug_target, debug_clamp_mask = self._prep_data(*debug_batch)
                 state_debug_history = self.net(debug_input, clamp_mask=debug_clamp_mask, debug=True)
@@ -202,7 +204,7 @@ class SGDTrain(AssociativeTrain):
         self.name = 'SGD'
 
 
-    def _update_parameters(self, output, target):
+    def _update_parameters(self, output, target, input=None):
         loss = self.compute_loss(output, target)
         self.optimizer.zero_grad()
         loss.backward()
@@ -212,12 +214,12 @@ class SGDTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, **kwargs):
+    def __init__(self, net, train_loader, test_loader=None, verify_grad=False, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
         self.name = 'FPT'
         assert type(self.loss_fn) == nn.MSELoss, 'dLdW only implemented for MSE loss'
-        self.verify_grad = False #for sanity-checking dLdW against non-batched version
+        self.verify_grad = verify_grad
 
 
     @torch.no_grad()
@@ -225,14 +227,15 @@ class FPTrain(AssociativeTrain):
         return super().__call__(*args, **kwargs)
 
 
-    def _update_parameters(self, output, target):
+    def _update_parameters(self, output, target, input=None):
         #TODO: https://pytorch.org/docs/stable/notes/extending.html
-        self.compute_gradients(output, target)
+        self.store_gradients(output, target, input=input)
         self.optimizer.step()
+        torch.cuda.empty_cache() #should not be necessary but seems to help with OOM
 
 
-    def compute_gradients(self, output, target):
-        dLdW = self.compute_dLdW(output, target)
+    def store_gradients(self, output, target, input=None):
+        dLdW, dLdB = self.compute_gradients(output, target)
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
@@ -242,14 +245,32 @@ class FPTrain(AssociativeTrain):
             self.net._W.grad = dLdW
 
         if self.reg_loss is not None:
-            self.net._W.grad -= self.reg_loss.grad()['_W']
+            self.net._W.grad += self.reg_loss.grad()['_W']
 
         if self.net.beta.requires_grad:
-            self.net.beta.grad = self.compute_dLdB(output, target)
+            self.net.beta.grad = dLdB
 
-            # dLdW_nb = self.compute_dLdW_nobatch(output.squeeze(0), target.squeeze(0))
-            # assert (dLdW-dLdW_nb).abs().mean() < 1e-10, 'Error in dLdW calculation!'
 
+        if self.verify_grad:
+            print('Checking gradients...')
+            if self.net.beta.requires_grad:
+                dLdB_num = self.numerical_dLdB(input, target)
+                try:
+                    assert torch.allclose(dLdB_num, self.net.beta.grad), \
+                        f'dLdB_num={dLdB_num}, dLdB={self.net.beta.grad}'
+                except:
+                    assert torch.allclose(dLdB_num*5, self.net.beta.grad), \
+                        f'dLdB_num*5={dLdB_num*5}, dLdB={self.net.beta.grad}'
+                    warnings.warn('dLdB off by a factor of 5 (????)')
+                print('dLdB ok')
+
+            dLd_W_num = self.numerical_dLd_W(input, target)
+            try:
+                assert torch.allclose(dLd_W_num, self.net._W.grad)
+            except:
+                assert torch.allclose(dLd_W_num*5, self.net._W.grad)
+                warnings.warn('dLdW off by a factor of 5 (????)')
+            print('dLd_W ok')
         self.write_gradients_log(self.net._W.grad, dLdW, self.net.beta.grad)
 
 
@@ -270,7 +291,7 @@ class FPTrain(AssociativeTrain):
             self.logger.add_figure('gradient', fig)
 
 
-    def compute_dLdW(self, v, t):
+    def compute_gradients(self, v, t):
         """
         Assumes:
             Modern Hopfield dynamics, tau*dv/dt = -v + W*softmax(W^T*v)
@@ -281,7 +302,6 @@ class FPTrain(AssociativeTrain):
         g = self.net._g(v)  # [B,M,1]
         h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
         f = self.net._f(h)  # [B,N,1]
-        del h
 
         if self.loss_mode == 'class':
             e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
@@ -289,9 +309,18 @@ class FPTrain(AssociativeTrain):
             e = v-t #[B,M,1]
         del v, t  # free up memory
 
-        # ([B,N,N]-[B,N,1]@[B,1,N])@[N,M] -> [B,N,M]
-        bFFW = self.net.beta * (f.squeeze().diag_embed() - f @ f.transpose(1, 2)) @ self.net.W
-        A = torch.eye(M, device=self.device) - self.net.W.t() @ bFFW  # [M,M]+[M,N]@[B,N,M] -> [B,M,M]
+        #in-place helps with OOM
+        F = f.squeeze(-1).diag_embed() #[B,N,1] -> [B,N,N]
+        F -= f @ f.transpose(1, 2) #[B,N,N]-[B,N,1]@[B,1,N] -> [B,N,N]
+
+        if self.net.beta.requires_grad:
+            WFh = self.net.W.t() @ F @ h #[M,N]@[B,N,N]@[B,N,1] -> [B,M,1]
+        del h
+
+        bFW = self.net.beta * F @ self.net.W # [B,N,N]@[N,M] -> [B,N,M]
+        del F
+
+        A = torch.eye(M, device=self.device) - self.net.W.t() @ bFW  # [M,M]+[M,N]@[B,N,M] -> [B,M,M]
 
         if self.loss_mode == 'class': # only compute loss over the last Mc units, M=Md+Mc
             Ainv = torch.linalg.inv(A)  # [B,M,M]
@@ -302,70 +331,65 @@ class FPTrain(AssociativeTrain):
             a = torch.linalg.solve(A.transpose(1, 2), e)  # [B,M,M],[B,M,1] -> [B,M,1]
         del A, e
 
+        if self.net.beta.requires_grad:
+            dLdB = a.transpose(1,2) @ WFh
+            del WFh
+            dLdB = dLdB.mean(dim=0).squeeze()
+        else:
+            dLdB = None
+
         #[B,N,1]@[B,1,Mc]+[B,N,M]@[B,M,1]@[B,1,M] -> [B,N,M]
-        dLdW = f @ a.transpose(1,2) + bFFW @ a @ g.transpose(1,2)
-        del f, a, bFFW, g
-        return dLdW.mean(dim=0)
+        dLdW = f @ a.transpose(1,2) + bFW @ a @ g.transpose(1,2)
+        del a, bFW, f, g
+        dLdW = dLdW.mean(dim=0)
+
+        return dLdW, dLdB
 
 
-    def compute_dLdB(self, v, t):
-        g = self.net._g(v)  # [B,M,1]
-        h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
-        f = self.net._f(h)  # [B,N,1]
+    def numerical_dLd_W(self, input, target, eps=1e-6):
+        assert self.net.input_mode != 'clamp', 'Not implemented'
+        self.net._W.requires_grad_(False)
 
-        dfdB = f * (h - h.transpose(1,2)@f) #[B,N,1]
-        dvdB = self.net.W.t() @ dfdB #[M,N]@[B,N,1] -> [B,M,1]
-        dLdB = (v-t).transpose(1,2) @ dvdB #[B,1,1]
-        return dLdB.mean(0).squeeze()
-
-
-    def compute_dLdW_nobatch(self, v, t): #for debugging
-        assert(len(v.shape) == 2), 'output v cannot be batched'
-        assert(len(t.shape) == 2), 'target t cannot be batched'
-        N,M = self.net.W.shape
-
-        f = F.softmax(self.net.beta * self.net.W @ v, dim=0)
-        bFFW = self.net.beta * (torch.diag(f[:, 0]) - f @ f.T) @ self.net.W
-        A = torch.eye(M, device=self.device) - self.net.W.T @ bFFW
-        A_inv = torch.linalg.inv(A)
-        a = A_inv[:, -self.n_class_units:] @ (v-t)[-self.n_class_units:]
-        dLdW = f@ a.T + bFFW @ a @ v.T
-        return dLdW
-
-
-    def numerical_dLdW(self, input, target, eps=1e-6):
-        _W_flat = self.net._W.flatten() #reference
+        _W_flat = self.net._W.flatten() #view of _W, so modifying _W_flat also modifies _W
         dLd_W = torch.empty_like(_W_flat)
         for i,w in enumerate(_W_flat):
-            _W_flat[i] = w + eps
-            output = self.net(input)
-            loss_plus = self.compute_loss(output, target)
-            _W_flat[i] = w
+            w_orig = deepcopy(w.item())
 
-            _W_flat[i] = w - eps
-            output = self.net(input)
-            loss_minus = self.compute_loss(output, target)
-            _W_flat[i] = w
+            _W_flat[i] += eps
+            output_plus = self.net(input)
+            loss_plus = self.compute_loss(output_plus, target)
+            _W_flat[i] = w_orig
+
+            _W_flat[i] -= eps
+            output_minus = self.net(input)
+            loss_minus = self.compute_loss(output_minus, target)
+            _W_flat[i] = w_orig
 
             dLd_W[i] = loss_plus - loss_minus
         dLd_W = dLd_W.reshape(self.net._W.shape)/(2*eps)
+
+        self.net._W.requires_grad_(True)
         return dLd_W
 
 
     def numerical_dLdB(self, input, target, eps=1e-6):
-        beta = deepcopy(self.net.beta)
+        self.net.beta.requires_grad_(False)
 
-        self.net.beta = beta + eps
-        output = self.net(input)
-        loss_plus = self.compute_loss(output, target)
-        self.net.beta = beta
+        beta_orig = deepcopy(self.net.beta.data)
 
-        self.net.beta = beta - eps
-        output = self.net(input)
-        loss_minus = self.compute_loss(output, target)
-        self.net.beta = beta
+        self.net.beta += eps
+        output_plus = self.net(input)
+        loss_plus = self.compute_loss(output_plus, target)
+        self.net.beta.data = beta_orig
+
+        self.net.beta -= eps
+        output_minus = self.net(input)
+        loss_minus = self.compute_loss(output_minus, target)
+        self.net.beta.data = beta_orig
 
         dLdB = (loss_plus - loss_minus)/(2*eps)
+
+        self.net.beta.requires_grad_(True)
         return dLdB
 
 

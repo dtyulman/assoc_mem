@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 
 #third-party
-import torch, joblib
+import torch
 
 #custom
 import utils, data, training, networks
@@ -13,51 +13,56 @@ import configs as cfg
 if os.path.abspath('.').find('dtyulman') > -1:
     os.chdir('/home/dtyulman/projects/assoc_mem')
 
+
 #%%
 train_config = cfg.Config({
-    'class': 'FPTrain', #FPTrain, SGDTrain
-    'batch_size': 50,
+    'class': 'SGDTrain', #FPTrain, SGDTrain
+    'batch_size': 300,
+    'verify_grad': False,
 
-    'optim': {'class': 'CustomOpt', #CustomOpt, Adam
-              'lr': 1.,
+    'optim': {'class': 'Adam', #CustomOpt, Adam
+              'lr': 1e-3.,
 
-              #CustomOpt only
+              #Adam only
+              'weight_decay': 0,
+              'amsgrad': False,
+
+              #for CustomOpt only
               'lr_decay': 1.,
-              'momentum': 0.999, #float,False
+              'momentum': 0.999, #float, False
               'clip': False, #norm, value, False
-              'clip_thres': None, #float, None
+              'clip_thres': None, #ignored if clip==False
               'rescale_grad': False, #True, False
               'beta_increment': False, #int, False
-              'beta_max': None, #float, None
+              'beta_max': None, #ignored if beta_increment==False
               },
 
-    'loss_mode': 'full', #full, class
+    'loss_mode': 'class', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'class', #full, class
     'acc_fn' : 'cls', #cls, L0, L1/mae
     'reg_fn': None, #L2, None
     'reg_rate': None,
 
-    'epochs': 500,
+    'epochs': 50,
     'print_every': 10,
     'sparse_log_factor': 1,
     'device': 'cuda', #cuda, cpu
     })
 
-
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 100,
-    'init': 'random', #random, data_mean, inputs, targets
+    'hidden_size': 2000,
+    'init': 'targets', #random, data_mean, inputs, targets
     'normalize_weight': True,
     'dropout': False,
-    'beta': 10.,
-    'train_beta': False,
+    'beta': 15.,
+    'train_beta': True,
     'tau': 1.,
     'normalize_input': False,
     'input_mode': 'clamp', #init, cont, init+cont, clamp
-    'dt': 0.05,
+    'dt': .05,
     'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
@@ -65,10 +70,10 @@ net_config = cfg.Config({
 
 data_values_config = cfg.Config({
     'class': 'MNISTDataset', #MNISTDataset, RandomDataset
-    'include_test': False,
+    'include_test': True,
     'normalize' : 'data+targets', #data, data+targets, False
-    'num_samples': 50, #if None takes entire MNISTDataset, requires int for RandomDataset
-    'balanced': True, #only for MNISTDataset or RandomDataset+'bern'
+    'num_samples': None, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
     'crop': False,
@@ -81,8 +86,8 @@ data_values_config = cfg.Config({
     })
 
 data_mode_config = cfg.Config({
-    'classify': True,
-    'perturb_entries': 10,
+    'classify': False,
+    'perturb_entries': 0.5,
     'perturb_mode': 'last',
     'perturb_value': 'min', #min, max, rand, <float>
     })
@@ -115,18 +120,23 @@ for config, label in zip(configs, labels):
     print(config)
     savedir = os.path.join(saveroot, label)
 
+    if config['train.verify_grad']:
+        torch.set_default_dtype(torch.float64) #double precision for numerical grad approx
+    else:
+        torch.set_default_dtype(torch.float) #pytorch's default b/c faster for GPUs
+
     #data
     train_data, test_data = data.get_aa_data(config['data.values'], config['data.mode'])
 
     #network
-    if config['net']['input_size'] is None:
-        config['net']['input_size'] = train_data[0][0].numel()
+    if config['net.input_size'] is None:
+        config['net.input_size'] = train_data[0][0].numel()
     init = config['net'].pop('init')
     NetClass = getattr(networks, config['net'].pop('class'))
     net = NetClass(**config['net'])
     with torch.no_grad():
         if init == 'random':
-            pass
+            pass #happens by default inside the net class
         elif init == 'data_mean':
             net._W = train_data[:][0].mean(dim=0).tile(1,net.hidden_size).T
             #add small noise to prevent identical hidden units
@@ -146,7 +156,7 @@ for config, label in zip(configs, labels):
     batch_size = config['train'].pop('batch_size')
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     if test_data:
-        test_loader = torch.utils.data.DataLoader(test_data, batch_size=1000)
+        test_loader = torch.utils.data.DataLoader(test_data, batch_size=1024)
     else:
         if batch_size < len(train_data):
             test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
@@ -154,8 +164,9 @@ for config, label in zip(configs, labels):
             test_loader = None
 
     reg_fn = config['train'].pop('reg_fn')
+    reg_rate = config['train'].pop('reg_rate')
     if reg_fn == 'L2':
-        reg_loss = training.L2Reg({'_W': net._W}, reg_rate=config['train'].pop('reg_rate'))
+        reg_loss = training.L2Reg({'_W': net._W}, reg_rate)
     elif reg_fn is None:
         reg_loss = None
     else:
@@ -164,7 +175,10 @@ for config, label in zip(configs, labels):
     optim_config = config['train'].pop('optim')
     optim_class = optim_config.pop('class')
     if optim_class == 'Adam':
-        optimizer = torch.optim.Adam(net.parameters(), lr=optim_config.pop('lr'))
+        optimizer = torch.optim.Adam(net.parameters(),
+                                     lr=optim_config.pop('lr', 1e-3),
+                                     weight_decay=optim_config.pop('weight_decay', 0),
+                                     amsgrad=optim_config.pop('amsgrad', False))
     elif optim_class == 'CustomOpt':
         optimizer = training.CustomOpt(net, **optim_config)
 
@@ -202,7 +216,7 @@ import matplotlib.pyplot as plt
 #             lr = trainer.lr,
 #             loss = trainer.loss_mode,
 #             sub = f'{subset}' if subset else '',
-#             dnorm = ':nml' if config['data']['normalize'] else '',
+#             dnorm = ':nml' if config['data.normalize'] else '',
 #             )
 title = ''
 net.to('cpu')

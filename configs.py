@@ -107,24 +107,28 @@ def verify_items(config, constraint, mode='raise'):
 
 
 def verify_config(config, mode='raise'):
-    if config['data']['mode']['classify']:
+    if config['data.mode.classify']:
         constraint = {
-            'train.acc_fn' : 'cls',
-            'train.acc_mode' : 'class',
-            'data.mode.perturb_mode' : 'last',}
+            'train.acc_fn': 'cls',
+            'train.acc_mode': 'class',
+            'data.mode.perturb_mode': 'last',}
         if config['data.values.class'] == 'MNISTDataset':
-            constraint.update({'data.mode.perturb_entries' : 10})
+            constraint.update({'data.mode.perturb_entries': 10})
         elif config['data.values.class'] == 'RandomDataset':
             constraint.update({'data.mode.perturb_entries': config['data.values.num_classes']})
-        else:
-            raise ValueError(f"Invalid dataset class: {config['data.values.class']}")
+
+        if config['net.input_mode'] == 'clamp':
+            constraint.update({'train.loss_mode': 'class'})
     else:
         constraint = {
-            # 'train.acc_fn' : 'mae',
-            'train.acc_mode' : 'full',
-            'train.loss_mode' : 'full',
-            'data.values.normalize' : ['data', False]
+            # 'train.acc_fn': 'mae',
+            'train.acc_mode': 'full',
+            'train.loss_mode': 'full',
+            'data.values.normalize': ['data', False]
             }
+
+    if config['net.train_beta']:
+        constraint.update({'train.optim.beta_increment': False})
 
     return verify_items(config, constraint)
 

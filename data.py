@@ -49,7 +49,7 @@ class RandomDataset(ClassifyDatasetBase):
         if distribution == 'bern':
             p = kwargs.pop('p', 0.5)
             balanced = kwargs.pop('balanced', False)
-            self.data = (torch.rand(num_samples, input_size, 1) > p).float()
+            self.data = (torch.rand(num_samples, input_size, 1) > p).to(torch.get_default_dtype())
             if balanced:
                 self.data = 2*self.data - 1
         elif distribution == 'gaus':
@@ -233,11 +233,11 @@ def filter_classes(dataset, select_classes='all', n_per_class=None, sort_by_clas
     if select_classes == 'all':
         select_classes = torch.arange(dataset.num_classes)
 
-    targets = dataset.targets.nonzero()[:,1] #get indices corresponding to this class
+    targets = dataset.targets.nonzero()[:,1] #one-hot to index
 
     selected_idx_per_class = []
     for c in select_classes:
-        idx = (targets == c).nonzero().squeeze().view(-1)
+        idx = (targets == c).nonzero().squeeze().view(-1) #get indices corresponding to this class
         if n_per_class is not None:
             idx = idx[:n_per_class] #only take the first n_per_class items of this class
         selected_idx_per_class.append(idx)
