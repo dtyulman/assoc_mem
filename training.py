@@ -222,7 +222,7 @@ class FPTrain(AssociativeTrain):
         self.verify_grad = verify_grad
 
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
 
@@ -235,12 +235,25 @@ class FPTrain(AssociativeTrain):
 
 
     def store_gradients(self, output, target, input=None):
+        if self.verify_grad: #compare w/ BPTT
+            # torch.set_grad_enabled(True)
+            loss = self.compute_loss(output, target)
+            self.optimizer.zero_grad()
+            loss.backward()
+            # torch.set_grad_enabled(False)
+
+
         dLdW, dLdB = self.compute_gradients(output, target)
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
-            self.net._W.grad = dLdW / Z - self.net._W * (S / Z**3)
+            dLd_W = dLdW / Z - self.net._W * (S / Z**3)
+            if self.verify_grad: #compare w/ BPTT
+                assert torch.allclose(self.net._W.grad, dLd_W)
+                print('dLd_W same as BPTT')
+
+            self.net._W.grad = dLd_W
         else:
             self.net._W.grad = dLdW
 
@@ -248,29 +261,24 @@ class FPTrain(AssociativeTrain):
             self.net._W.grad += self.reg_loss.grad()['_W']
 
         if self.net.beta.requires_grad:
+            if self.verify_grad: #compare w/ BPTT
+                assert torch.allclose(self.net.beta.grad, dLdB), f'dLdB_bptt={self.net.beta.grad}, dLdB={dLdB}'
+                print('dLdB same as BPTT')
             self.net.beta.grad = dLdB
 
 
-        if self.verify_grad:
+        if self.verify_grad: #compare with finite-diffs
             print('Checking gradients...')
             if self.net.beta.requires_grad:
                 dLdB_num = self.numerical_dLdB(input, target)
-                try:
-                    assert torch.allclose(dLdB_num, self.net.beta.grad), \
+                assert torch.allclose(dLdB_num, self.net.beta.grad), \
                         f'dLdB_num={dLdB_num}, dLdB={self.net.beta.grad}'
-                except:
-                    assert torch.allclose(dLdB_num*5, self.net.beta.grad), \
-                        f'dLdB_num*5={dLdB_num*5}, dLdB={self.net.beta.grad}'
-                    warnings.warn('dLdB off by a factor of 5 (????)')
                 print('dLdB ok')
 
             dLd_W_num = self.numerical_dLd_W(input, target)
-            try:
-                assert torch.allclose(dLd_W_num, self.net._W.grad)
-            except:
-                assert torch.allclose(dLd_W_num*5, self.net._W.grad)
-                warnings.warn('dLdW off by a factor of 5 (????)')
+            assert torch.allclose(dLd_W_num, self.net._W.grad)
             print('dLd_W ok')
+
         self.write_gradients_log(self.net._W.grad, dLdW, self.net.beta.grad)
 
 
@@ -307,6 +315,8 @@ class FPTrain(AssociativeTrain):
             e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
         else:
             e = v-t #[B,M,1]
+        e *= 2/e.shape[1] #correct for loss normalization to match nn.MSELoss ((v-t)^2).mean()
+
         del v, t  # free up memory
 
         #in-place helps with OOM
@@ -347,7 +357,7 @@ class FPTrain(AssociativeTrain):
 
 
     def numerical_dLd_W(self, input, target, eps=1e-6):
-        assert self.net.input_mode != 'clamp', 'Not implemented'
+        assert self.net.input_mode != 'clamp', 'Numerical grad for clamped input not implemented'
         self.net._W.requires_grad_(False)
 
         _W_flat = self.net._W.flatten() #view of _W, so modifying _W_flat also modifies _W

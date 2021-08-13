@@ -16,12 +16,12 @@ if os.path.abspath('.').find('dtyulman') > -1:
 
 #%%
 train_config = cfg.Config({
-    'class': 'SGDTrain', #FPTrain, SGDTrain
+    'class': 'FPTrain', #FPTrain, SGDTrain
     'batch_size': 300,
-    'verify_grad': False,
+    'verify_grad': True,
 
     'optim': {'class': 'Adam', #CustomOpt, Adam
-              'lr': 1e-3.,
+              'lr': 1e-3,
 
               #Adam only
               'weight_decay': 0,
@@ -47,13 +47,13 @@ train_config = cfg.Config({
     'epochs': 50,
     'print_every': 10,
     'sparse_log_factor': 1,
-    'device': 'cuda', #cuda, cpu
+    'device': 'cpu', #cuda, cpu
     })
 
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 2000,
+    'hidden_size': 20,
     'init': 'targets', #random, data_mean, inputs, targets
     'normalize_weight': True,
     'dropout': False,
@@ -61,7 +61,7 @@ net_config = cfg.Config({
     'train_beta': True,
     'tau': 1.,
     'normalize_input': False,
-    'input_mode': 'clamp', #init, cont, init+cont, clamp
+    'input_mode': 'init', #init, cont, init+cont, clamp
     'dt': .05,
     'num_steps': 500,
     'fp_mode': 'iter', #iter, del2
@@ -69,10 +69,10 @@ net_config = cfg.Config({
     })
 
 data_values_config = cfg.Config({
-    'class': 'MNISTDataset', #MNISTDataset, RandomDataset
-    'include_test': True,
+    'class': 'RandomDataset', #MNISTDataset, RandomDataset
+    'include_test': False,
     'normalize' : 'data+targets', #data, data+targets, False
-    'num_samples': None, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'num_samples': 20, #if None takes entire MNISTDataset, requires int for RandomDataset
     'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
@@ -81,13 +81,13 @@ data_values_config = cfg.Config({
 
     #RandomDataset only
     'distribution': 'bern', #bern, unif, gaus
-    'input_size': 784,
-    'num_classes': 10,
+    'input_size': 20,
+    'num_classes': 3,
     })
 
 data_mode_config = cfg.Config({
-    'classify': False,
-    'perturb_entries': 0.5,
+    'classify': True,
+    'perturb_entries': 3,
     'perturb_mode': 'last',
     'perturb_value': 'min', #min, max, rand, <float>
     })
