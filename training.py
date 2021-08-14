@@ -344,7 +344,7 @@ class FPTrain(AssociativeTrain):
         if self.net.beta.requires_grad:
             dLdB = a.transpose(1,2) @ WFh
             del WFh
-            dLdB = dLdB.mean(dim=0).squeeze()
+            dLdB = dLdB.squeeze().mean(dim=0)
         else:
             dLdB = None
 
