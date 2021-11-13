@@ -30,9 +30,8 @@ def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
     return ax
 
 
-
 def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
-                         cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
+               cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
     fig, ax = prep_axes(ax)
     mat = mat.squeeze()
     try:
@@ -55,7 +54,6 @@ def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
 
     ax.axis('off')
     ax.set_title(title)
-
 
 
 def plot_data_batch(inputs, targets, ax=None):
@@ -263,10 +261,10 @@ def rows_to_images(M, vpix=None, hpix=None, drop_last=0, pad_nan=True):
     Optionally discard the drop_last entries of each row before reshaping it."""
     if drop_last > 0:
         M = M[:,:-drop_last]
-    vpix, hpix = length_to_rows_cols(M.shape[1], vpix, hpix) #default to square-ish
+    length = M.shape[1]
+    vpix, hpix = length_to_rows_cols(length, vpix, hpix) #default to square-ish
 
     if pad_nan:
-        length = M.shape[1]
         padding = vpix*hpix - length
         M = np.pad(M, ((0,0),(0,padding)), constant_values=float('nan'))
     return [r.reshape(vpix,hpix) for r in M]

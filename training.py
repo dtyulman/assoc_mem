@@ -12,11 +12,11 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 #custom
 import plots, data
-
+GRAD_CHECK_MODE = 'raise' #raise, warn
 
 class AssociativeTrain():
     def __init__(self, net, train_loader, test_loader=None, optimizer=None,
-                 loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='l0', reg_loss=None,
+                 loss_mode='class', loss_fn='mse', acc_mode='class', acc_fn='L0', reg_loss=None,
                  logger=None, logdir=None, print_every=100, sparse_log_factor=10, **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
@@ -83,8 +83,8 @@ class AssociativeTrain():
                 for batch in self.train_loader:
                     self.logger.iteration += 1
 
-                    input, target, clamp_mask = self._prep_data(*batch)
-                    output = self.net(input, clamp_mask)
+                    input, target = self._prep_data(*batch)
+                    output = self.net(input)
                     self._update_parameters(output, target, input)
 
                     #bug/feature: logs the resulting loss/acc *after* the param update,
@@ -98,7 +98,7 @@ class AssociativeTrain():
     def _prep_data(self, input, target, perturb_mask):
         input, target = input.to(self.device), target.to(self.device)
         clamp_mask = ~perturb_mask if ('clamp' in self.net.input_mode) else None
-        return input, target, clamp_mask
+        return (input, clamp_mask), target
 
 
     def _update_parameters(self, output, target, input=None):
@@ -129,9 +129,7 @@ class AssociativeTrain():
 
 
     @torch.no_grad()
-    def write_log(self, input=None, target=None, clamp_mask=None, output=None,
-                  train_loss=None, train_acc=None):
-
+    def write_log(self, input=None, target=None, output=None, train_loss=None, train_acc=None):
         if self.logger.iteration % self.print_every == 0:
             self.net.eval()
 
@@ -144,8 +142,8 @@ class AssociativeTrain():
                 if output is None:
                     if input is None:
                         batch = next(iter(self.train_loader))
-                        input, target, clamp_mask = self._prep_data(*batch)
-                    output = self.net(input, clamp_mask)
+                        input, target = self._prep_data(*batch)
+                    output = self.net(input)
 
                 if train_loss is None:
                     train_loss = self.compute_loss(output, target)
@@ -160,9 +158,9 @@ class AssociativeTrain():
             #test loss/acc if applicable
             if self.test_loader is not None:
                 test_batch = next(iter(self.test_loader))
-                test_input, test_target, test_clamp_mask = self._prep_data(*test_batch)
+                test_input, test_target = self._prep_data(*test_batch)
 
-                test_output = self.net(test_input, test_clamp_mask)
+                test_output = self.net(test_input)
                 test_loss = self.compute_loss(test_output, test_target)
                 test_acc = self.compute_acc(test_output, test_target)
 
@@ -180,15 +178,19 @@ class AssociativeTrain():
 
             #log plots/images more sparsely to save space
             if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
-                fig = plots.plot_weights(self.net)[0].get_figure()
+                ax = plots.plot_weights(self.net)
+                try:
+                    fig = ax[0].get_figure()
+                except:
+                    fig = ax.get_figure()
                 self.logger.add_figure('weights', fig)
 
                 #note, this grabs the first 10 of each class, not the first 100 samples, so if
                 #initializing weights with data, it's not guaranteed that the first 100 hidden units
                 #will be most active for the debug batch
                 debug_batch = data.get_aa_debug_batch(self.train_loader.dataset, n_per_class=10)
-                debug_input, debug_target, debug_clamp_mask = self._prep_data(*debug_batch)
-                state_debug_history = self.net(debug_input, clamp_mask=debug_clamp_mask, debug=True)
+                debug_input, debug_target = self._prep_data(*debug_batch)
+                state_debug_history = self.net(debug_input, debug=True)
                 fig = plots.plot_hidden_max_argmax(state_debug_history, n_per_class=None)[0].get_figure()
                 self.logger.add_figure('hidden', fig)
 
@@ -235,49 +237,59 @@ class FPTrain(AssociativeTrain):
 
 
     def store_gradients(self, output, target, input=None):
-        if self.verify_grad: #compare w/ BPTT
-            # torch.set_grad_enabled(True)
-            loss = self.compute_loss(output, target)
-            self.optimizer.zero_grad()
-            loss.backward()
-            # torch.set_grad_enabled(False)
-
-
+        #compute FPT grad
         dLdW, dLdB = self.compute_gradients(output, target)
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
             S = (dLdW * self.net._W).sum(dim=1, keepdim=True) #[N,M],[N,M]->[N,1]
             dLd_W = dLdW / Z - self.net._W * (S / Z**3)
-            if self.verify_grad: #compare w/ BPTT
-                assert torch.allclose(self.net._W.grad, dLd_W)
-                print('dLd_W same as BPTT')
-
-            self.net._W.grad = dLd_W
         else:
-            self.net._W.grad = dLdW
+            dLd_W = dLdW
 
         if self.reg_loss is not None:
-            self.net._W.grad += self.reg_loss.grad()['_W']
+            dLd_W += self.reg_loss.grad()['_W']
 
-        if self.net.beta.requires_grad:
-            if self.verify_grad: #compare w/ BPTT
-                assert torch.allclose(self.net.beta.grad, dLdB), f'dLdB_bptt={self.net.beta.grad}, dLdB={dLdB}'
-                print('dLdB same as BPTT')
-            self.net.beta.grad = dLdB
-
-
-        if self.verify_grad: #compare with finite-diffs
+        #compare FPT w/ BPTT and numerical
+        if self.verify_grad:
             print('Checking gradients...')
+
+            #store BPTT grad to compare w/ FPT
+            self.optimizer.zero_grad()
+            loss = self.compute_loss(output, target)
+            loss.backward()
+
             if self.net.beta.requires_grad:
                 dLdB_num = self.numerical_dLdB(input, target)
-                assert torch.allclose(dLdB_num, self.net.beta.grad), \
-                        f'dLdB_num={dLdB_num}, dLdB={self.net.beta.grad}'
-                print('dLdB ok')
+                check_close(dLdB_num, self.net.beta.grad, 'dLdB_NUM', 'dLdB_BPTT')
+                check_close(dLdB_num, dLdB, 'dLdB_NUM', 'dLdB_FPT')
+                check_close(self.net.beta.grad, dLdB, 'dLdB_BPTT', 'dLdB_FPT')
 
-            dLd_W_num = self.numerical_dLd_W(input, target)
-            assert torch.allclose(dLd_W_num, self.net._W.grad)
-            print('dLd_W ok')
+            # dLd_W_num = self.numerical_dLd_W(input, target)
+
+            _,ax = plt.subplots(3,4)
+            [a.axis('off') for a in ax.flatten()]
+            plots._plot_rows(input[0], title='in', ax=ax[0,0])
+            plots._plot_rows(output, title='out', ax=ax[0,1])
+            plots._plot_rows(target, title='tgt', ax=ax[0,2])
+            plots._plot_rows(output-target, title='err = out-tgt', ax=ax[0,3])
+
+            plots._plot_rows(dLd_W, title='fpt', ax=ax[1,0])
+            plots._plot_rows(self.net._W.grad, title='bptt', ax=ax[1,1])
+            # plots._plot_rows(dLd_W_num, title='num', ax=ax[1,2])
+
+            plots._plot_rows(dLd_W-self.net._W.grad, title='fpt-bptt', ax=ax[2,0])
+            # plots._plot_rows(dLd_W-dLd_W_num, title='fpt-num', ax=ax[2,1])
+            # plots._plot_rows(self.net._W.grad-dLd_W_num, title='bptt-num', ax=ax[2,2])
+
+            # check_close(dLd_W_num, self.net._W.grad, 'dLd_W_NUM', 'dLd_W_BPTT')
+            # check_close(dLd_W_num, dLd_W, 'dLd_W_NUM', 'dLd_W_FPT')
+            # check_close(self.net._W.grad, dLd_W, 'dLd_W_BPTT', 'dLd_W_FPT')
+
+        #save FPT grads (overwrites BPTT grads if those were stored)
+        self.net._W.grad = dLd_W
+        if self.net.beta.requires_grad:
+            self.net.beta.grad = dLdB
 
         self.write_gradients_log(self.net._W.grad, dLdW, self.net.beta.grad)
 
@@ -311,12 +323,9 @@ class FPTrain(AssociativeTrain):
         h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
         f = self.net._f(h)  # [B,N,1]
 
-        if self.loss_mode == 'class':
-            e = v[:, -self.n_class_units:] - t[:, -self.n_class_units:]  # error [B,Mc,1]
-        else:
-            e = v-t #[B,M,1]
-        e *= 2/e.shape[1] #correct for loss normalization to match nn.MSELoss ((v-t)^2).mean()
-
+        if self.loss_mode == 'class': #only compute loss over the last Mc units, M=Md+Mc
+            v, t = v[:, -self.n_class_units:], t[:, -self.n_class_units:]
+        e = v-t #error [B,M,1] or [B,Mc,1]
         del v, t  # free up memory
 
         #in-place helps with OOM
@@ -327,37 +336,38 @@ class FPTrain(AssociativeTrain):
             WFh = self.net.W.t() @ F @ h #[M,N]@[B,N,N]@[B,N,1] -> [B,M,1]
         del h
 
-        bFW = self.net.beta * F @ self.net.W # [B,N,N]@[N,M] -> [B,N,M]
+        bFW = self.net.beta * F @ self.net.W #[B,N,N]@[N,M] -> [B,N,M]
         del F
 
         A = torch.eye(M, device=self.device) - self.net.W.t() @ bFW  # [M,M]+[M,N]@[B,N,M] -> [B,M,M]
 
-        if self.loss_mode == 'class': # only compute loss over the last Mc units, M=Md+Mc
-            Ainv = torch.linalg.inv(A)  # [B,M,M]
+        if self.loss_mode == 'class':
+            Ainv = torch.linalg.inv(A) #[B,M,M]
             a = Ainv[:, -self.n_class_units:].transpose(1, 2) @ e #[B,M,Mc]@[B,Mc,1] -> [B,M,1]
             del Ainv
-        else:
-            # a = A^(-1)^T * e <=> a = A^(-1) * e  b/c A and A^(-1) symmetric for g(x)=x
-            a = torch.linalg.solve(A.transpose(1, 2), e)  # [B,M,M],[B,M,1] -> [B,M,1]
+        else: #more numerically stable
+            #a = A^(-1)^T * e <=> a = A^(-1) * e  b/c A and A^(-1) symmetric for g(x)=x
+            a = torch.linalg.solve(A, e) #[B,M,M],[B,M,1] -> [B,M,1]
         del A, e
 
         if self.net.beta.requires_grad:
             dLdB = a.transpose(1,2) @ WFh
             del WFh
             dLdB = dLdB.squeeze().mean(dim=0)
+            dLdB *= 2/M #correct for loss normalization to match nn.MSELoss ((v-t)^2).mean()
         else:
             dLdB = None
 
-        #[B,N,1]@[B,1,Mc]+[B,N,M]@[B,M,1]@[B,1,M] -> [B,N,M]
+        #[B,N,1]@[B,1,Mc] + [B,N,M]@[B,M,1]@[B,1,M] -> [B,N,M]
         dLdW = f @ a.transpose(1,2) + bFW @ a @ g.transpose(1,2)
         del a, bFW, f, g
         dLdW = dLdW.mean(dim=0)
+        dLdW *= 2/M
 
         return dLdW, dLdB
 
 
     def numerical_dLd_W(self, input, target, eps=1e-6):
-        assert self.net.input_mode != 'clamp', 'Numerical grad for clamped input not implemented'
         self.net._W.requires_grad_(False)
 
         _W_flat = self.net._W.flatten() #view of _W, so modifying _W_flat also modifies _W
@@ -579,6 +589,33 @@ def l0_acc(output, target):
 
 def l1_acc(output, target):
     return 1 - F.l1_loss(output, target)
+
+
+########
+# Misc #
+########
+
+def check_close(tensor1, tensor2, str1=None, str2=None, **kwargs):
+    mode = GRAD_CHECK_MODE
+
+    if str1 is None:
+        str1 = 'Tensor 1'
+    if str2 is None:
+        str2 = 'Tensor 2'
+
+    max_abs_diff = (tensor1-tensor2).abs().max()
+    debug_msg = f'{str1} {{}} {str2}, MaxAbsDiff={max_abs_diff}'
+
+    if torch.allclose(tensor1, tensor2, **kwargs):
+        print(debug_msg.format('same as'))
+    else:
+        debug_msg = debug_msg.format('!=')
+        if mode == 'raise':
+            raise Exception(debug_msg)
+        elif mode == 'warn':
+            print('!--> ' + debug_msg)
+        else:
+            raise ValueError(f"Invalid check mode: '{mode}'")
 
 
 ############

@@ -130,6 +130,9 @@ def verify_config(config, mode='raise'):
     if config['net.train_beta']:
         constraint.update({'train.optim.beta_increment': False})
 
+    if config['net.init'] in ['inputs', 'targets']:
+        assert config['data.values.num_samples'] >= config['net.hidden_size']
+
     return verify_items(config, constraint)
 
 

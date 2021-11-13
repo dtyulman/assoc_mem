@@ -54,7 +54,12 @@ class ModernHopfield(nn.Module):
             self.W = self._W
 
 
-    def _initialize_input(self, input, clamp_mask):
+    def _parse_input(self, input):
+        clamp_mask = None
+        if type(input) == tuple:
+            assert len(input) == 2
+            input, clamp_mask = input
+
         if self.normalize_input:
             input /= input.norm(dim=1, keepdim=True)
 
@@ -66,13 +71,15 @@ class ModernHopfield(nn.Module):
         if 'cont' in self.input_mode:
             external_current = input
         if 'clamp' in self.input_mode:
+            assert clamp_mask is not None
             clamp_values = input[clamp_mask]
+            state[clamp_mask] = clamp_values
 
         if self.training and self.dropout:
             batch_size, input_size, _ = input.shape #[B,M,1]
             self.dropout_mask = torch.rand(batch_size, self.hidden_size, 1) < self.dropout #[B.N,1]
 
-        return state, external_current, clamp_values
+        return state, external_current, clamp_mask, clamp_values
 
 
     def _maybe_dropout(self, f):
@@ -81,9 +88,13 @@ class ModernHopfield(nn.Module):
         return f
 
 
-    def forward(self, input, clamp_mask=None, debug=False):
+    def forward(self, input, debug=False):
+        """input is either a [B,N,1]-dim tensor or a tuple (input, clamp_mask) where clamp_mask is
+        a [B,N,1]-dim boolean tensor indicating which input units to clamp. clamp_value is inferred
+        from input and clamp_mask as input[clamp_mask]. clamp_mask is ignored unless self.input_mode
+        is 'clamp'"""
         self._maybe_normalize_weight()
-        state, external_current, clamp_values = self._initialize_input(input, clamp_mask) #[B,M,1],[B,M,1]
+        state, external_current, clamp_mask, clamp_values = self._parse_input(input) #[B,M,1],[B,M,1]
 
         if debug:
             state_debug_history = []
@@ -96,14 +107,14 @@ class ModernHopfield(nn.Module):
 
             if debug: #state is actually state_debug
                 state_debug_history.append(state) #store it
-                state = state['state'] #extract the actual state from the dict
+                state = state['v_next'] #extract the actual state from the dict
 
             #check convergence
             with torch.no_grad():
                 update_magnitude = (prev_state-state).norm()
-            if step > self.num_steps and update_magnitude > self.fp_thres:
-                warnings.warn('Not converged: '
-                      f'(update={update_magnitude}, fp_thres={self.fp_thres})')
+                if step >= self.num_steps and update_magnitude > self.fp_thres:
+                    warnings.warn('Not converged: '
+                          f'(update={update_magnitude}, fp_thres={self.fp_thres})')
 
         if debug:
             return state_debug_history
@@ -143,25 +154,35 @@ class ModernHopfield(nn.Module):
 
     def update_state(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
         """
-        Continuous: tau*dv/dt = -v + X*softmax(X^T*v)
-        Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + X*softmax(X^T*v(t))]
+        Continuous: tau*dv/dt = -v + W*softmax(W^T*v)
+        Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + W*softmax(W^T*v(t))]
         """
         h = self.W @ self._g(v) #[N,M],[B,M,1]->[B,N,1]
         f = self._maybe_dropout(self._f(h)) #[B,N,1]
         v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
-        state = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
+        v_next = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
         #     = (1-dt/tau)*v + (dt/tau)*v_instant
 
-        if self.input_mode == 'clamp':
-            state[clamp_mask] = clamp_values
+        if 'clamp' in self.input_mode:
+            #overwrite any updates to clamped units
+            v_next[clamp_mask] = clamp_values
+
+        #Can also do it without overwriting like this but it's significantly slower
+        #     v_next = torch.zeros_like(v)
+        #     v_next[clamp_mask] = v[clamp_mask]
+        #     B,N = v.shape[0], self.W.shape[0]
+        #     Wt_eff = self.W.t().expand(B,-1,-1)[~clamp_mask.squeeze()].reshape(B,-1,N)
+        #     v_instant = Wt_eff @ f + I[~clamp_mask.squeeze()].reshape(B,-1,1) #[B,Md,N],[B,N,1]->[B,Md,1]
+        #     v_next[~clamp_mask] = v[~clamp_mask] + (self.dt/self.tau)*(v_instant.flatten() - v[~clamp_mask]) #[B,M,1]
+
 
         if debug:
             state_debug = {}
-            for key in ['I', 'h', 'f', 'v_instant', 'state', 'v']:
-                #TODO: should be storing state *before* update? (only matters for 'cont' input_mode)
+            for key in ['I', 'h', 'f', 'v_instant', 'v_next', 'v']:
+                #TODO: should be storing v_next *before* update? (only matters for 'cont' input_mode)
                 state_debug[key] = locals()[key].detach()
             return state_debug
-        return state
+        return v_next
 
 
     @torch.no_grad()

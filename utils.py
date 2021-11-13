@@ -1,5 +1,5 @@
-import os, glob, datetime, gc
-import torch, joblib, pynvml
+import os, glob, datetime, gc, warnings
+import torch, joblib
 
 
 def initialize_savedir(baseconfig):
@@ -33,6 +33,11 @@ def choose_device(dev_str):
     """If dev_str is 'cuda', returns 'cuda:X' where X is the gpu with the most free memory.
     """
     if dev_str == 'cuda':
+        try:
+            import pynvml
+        except ImportError as e:
+            warnings.warn(e.msg + f'. Using default device: {dev_str}')
+            return dev_str
         best_dev_idx = 0
         best_mem_free = 0
         pynvml.nvmlInit()
