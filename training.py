@@ -238,7 +238,7 @@ class FPTrain(AssociativeTrain):
 
     def store_gradients(self, output, target, input=None):
         #compute FPT grad
-        dLdW, dLdB = self.compute_gradients(output, target)
+        dLdW, dLdB = self.compute_gradients(output, target, input=input)
         if self.net.normalize_weight:
             #W is normalized, _W is not, need one more step of chain rule
             Z = self.net._W.norm(dim=1, keepdim=True) #[N,M]->[N,1]
@@ -252,7 +252,7 @@ class FPTrain(AssociativeTrain):
 
         #compare FPT w/ BPTT and numerical
         if self.verify_grad:
-            print('Checking gradients...')
+            print('Checking gradients (BPTT)...')
 
             #store BPTT grad to compare w/ FPT
             self.optimizer.zero_grad()
@@ -265,7 +265,8 @@ class FPTrain(AssociativeTrain):
                 check_close(dLdB_num, dLdB, 'dLdB_NUM', 'dLdB_FPT')
                 check_close(self.net.beta.grad, dLdB, 'dLdB_BPTT', 'dLdB_FPT')
 
-            # dLd_W_num = self.numerical_dLd_W(input, target)
+            print('Checking gradients (numerical)...')
+            dLd_W_num = self.numerical_dLd_W(input, target)
 
             _,ax = plt.subplots(3,4)
             [a.axis('off') for a in ax.flatten()]
@@ -276,15 +277,36 @@ class FPTrain(AssociativeTrain):
 
             plots._plot_rows(dLd_W, title='fpt', ax=ax[1,0])
             plots._plot_rows(self.net._W.grad, title='bptt', ax=ax[1,1])
-            # plots._plot_rows(dLd_W_num, title='num', ax=ax[1,2])
+            plots._plot_rows(dLd_W_num, title='num', ax=ax[1,2])
 
             plots._plot_rows(dLd_W-self.net._W.grad, title='fpt-bptt', ax=ax[2,0])
-            # plots._plot_rows(dLd_W-dLd_W_num, title='fpt-num', ax=ax[2,1])
-            # plots._plot_rows(self.net._W.grad-dLd_W_num, title='bptt-num', ax=ax[2,2])
+            plots._plot_rows(dLd_W-dLd_W_num, title='fpt-num', ax=ax[2,1])
+            plots._plot_rows(self.net._W.grad-dLd_W_num, title='bptt-num', ax=ax[2,2])
 
             # check_close(dLd_W_num, self.net._W.grad, 'dLd_W_NUM', 'dLd_W_BPTT')
             # check_close(dLd_W_num, dLd_W, 'dLd_W_NUM', 'dLd_W_FPT')
             # check_close(self.net._W.grad, dLd_W, 'dLd_W_BPTT', 'dLd_W_FPT')
+
+            # print('Checking dv/dW (FPT)...')
+            # dvdW = compute_dvdW(output, self.net.W, self.net.beta).mean(dim=0)
+            # N,M,_,_ = dvdW.shape
+            # _,ax = plt.subplots(int(np.ceil(np.sqrt(M))),int(np.floor(np.sqrt(M))))
+            # ax = ax.flatten()
+            # for j in range(M):
+            #     plots._plot_rows(dvdW[:,:,j], title=f'$dv_{ {j} }/dW$', ax=ax[j])
+            # plt.gcf().suptitle('FPT')
+
+            # print('Checking dv/dW (BPTT)...')
+            # output_batch_avg = output.mean(dim=0)
+            # M,_ = output_batch_avg.shape
+            # _,ax = plt.subplots(int(np.ceil(np.sqrt(M))),int(np.floor(np.sqrt(M))))
+            # ax = ax.flatten()
+            # for j in range(M):
+            #     self.optimizer.zero_grad()
+            #     output_batch_avg[j].backward(retain_graph=True)
+            #     plots._plot_rows(self.net._W.grad, title=f'$dv_{ {j} }/dW$', ax=ax[j])
+            # plt.gcf().suptitle('BPTT')
+
 
         #save FPT grads (overwrites BPTT grads if those were stored)
         self.net._W.grad = dLd_W
@@ -311,14 +333,25 @@ class FPTrain(AssociativeTrain):
             self.logger.add_figure('gradient', fig)
 
 
-    def compute_gradients(self, v, t):
+    def compute_gradients(self, v, t, input):
         """
         Assumes:
             Modern Hopfield dynamics, tau*dv/dt = -v + W*softmax(W^T*v)
             v is a fixed point, dv/dt = 0, i.e. v = W*softmax(W^T*v)
             MSE loss, L = 1/2B sum_i sum_b (v_i - t_i)^2, where B is batch size
         """
-        N,M = self.net.W.shape
+        N,M = self.net.W.shape #num hidden neurons, num feature neurons
+        B = v.shape[0] #batch size
+
+        if 'clamp' in self.net.input_mode:
+            assert type(input) == tuple
+            assert len(input) == 2
+            assert not self.net.beta.requires_grad, 'FPT dL/dBeta not implemented with clamping'
+            for i in range(B-1):
+                assert (input[1][i]==input[1][i+1]).all(), 'clamp mask must be the same for entire batch'
+            unclamped = ~input[1]
+            del input
+
         g = self.net._g(v)  # [B,M,1]
         h = self.net._h(g)  # [N,M]@[B,M,1] -> [B,N,1]
         f = self.net._f(h)  # [B,N,1]
@@ -340,6 +373,11 @@ class FPTrain(AssociativeTrain):
         del F
 
         A = torch.eye(M, device=self.device) - self.net.W.t() @ bFW  # [M,M]+[M,N]@[B,N,M] -> [B,M,M]
+        if 'clamp' in self.net.input_mode:
+            e = e[unclamped].reshape(B,-1,1)
+            unclamped = unclamped.long()
+            Mu = e.shape[1] #number of unclamped feature neurons
+            A = A[(unclamped @ unclamped.transpose(1,2)).bool()].reshape(B,Mu,Mu)
 
         if self.loss_mode == 'class':
             Ainv = torch.linalg.inv(A) #[B,M,M]
@@ -349,6 +387,11 @@ class FPTrain(AssociativeTrain):
             #a = A^(-1)^T * e <=> a = A^(-1) * e  b/c A and A^(-1) symmetric for g(x)=x
             a = torch.linalg.solve(A, e) #[B,M,M],[B,M,1] -> [B,M,1]
         del A, e
+
+        if 'clamp' in self.net.input_mode:
+            tmp = torch.zeros(B,M,1)
+            tmp[unclamped.bool()] = a.flatten()
+            a = tmp
 
         if self.net.beta.requires_grad:
             dLdB = a.transpose(1,2) @ WFh
