@@ -3,29 +3,30 @@ import os
 from copy import deepcopy
 
 #third-party
-import torch
+import torch, joblib
+import matplotlib.pyplot as plt
+
+#for my machine only TODO: remove
+try:
+    os.chdir('/Users/danil/My/School/Columbia/Research/assoc_mem')
+except FileNotFoundError as e:
+    print(e.args)
 
 #custom
 import utils, data, training, networks
 import configs as cfg
-
-#for my machine only TODO: remove
-if os.path.abspath('.').find('dtyulman') > -1:
-    os.chdir('/home/dtyulman/projects/assoc_mem')
-
-
 #%%
 train_config = cfg.Config({
-    'class': 'FPTrain', #FPTrain, SGDTrain
-    'batch_size': 300,
-    'verify_grad': True,
+    'class': 'SGDTrain', #FPTrain, SGDTrain
+    'batch_size': 256,
+    'verify_grad': False,
 
     'optim': {'class': 'Adam', #CustomOpt, Adam
-              'lr': 1e-3,
+              # 'lr': 1e-3,
 
               #Adam only
-              'weight_decay': 0,
-              'amsgrad': False,
+              # 'weight_decay': 0,
+              # 'amsgrad': False,
 
               #for CustomOpt only
               'lr_decay': 1.,
@@ -37,42 +38,43 @@ train_config = cfg.Config({
               'beta_max': None, #ignored if beta_increment==False
               },
 
-    'loss_mode': 'class', #full, class
+    'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
-    'acc_mode': 'class', #full, class
-    'acc_fn' : 'cls', #cls, L0, L1/mae
+    'acc_mode': 'full', #full, class
+    'acc_fn' : 'mae', #cls, L0, L1/mae
     'reg_fn': None, #L2, None
     'reg_rate': None,
 
-    'epochs': 50,
+    'epochs': 1000,
     'print_every': 10,
     'sparse_log_factor': 1,
-    'device': 'cpu', #cuda, cpu
+    'device': 'cuda', #cuda, cpu
     })
 
 net_config = cfg.Config({
     'class': 'ModernHopfield',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 20,
-    'init': 'targets', #random, data_mean, inputs, targets
+    'hidden_size': 225,
+    'init': 'random', #random, data_mean, inputs, targets
     'normalize_weight': True,
-    'dropout': False,
-    'beta': 15.,
+    'dropout': False, #float in (0,1), or False
+    'beta': 7.,
     'train_beta': True,
     'tau': 1.,
     'normalize_input': False,
-    'input_mode': 'init', #init, cont, init+cont, clamp
-    'dt': .05,
-    'num_steps': 500,
+    'input_mode': 'clamp', #init, cont, init+cont, clamp
+    'dt': .1,
+    'num_steps': 50000,
     'fp_mode': 'iter', #iter, del2
     'fp_thres':1e-9,
     })
 
+
 data_values_config = cfg.Config({
-    'class': 'RandomDataset', #MNISTDataset, RandomDataset
-    'include_test': False,
-    'normalize' : 'data+targets', #data, data+targets, False
-    'num_samples': 20, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'class': 'MNISTDataset', #MNISTDataset, RandomDataset
+    'include_test': True,
+    'normalize' : 'data', #data, data+targets, False
+    'num_samples': None, #if None takes entire MNISTDataset, requires int for RandomDataset
     'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
@@ -81,13 +83,14 @@ data_values_config = cfg.Config({
 
     #RandomDataset only
     'distribution': 'bern', #bern, unif, gaus
-    'input_size': 20,
+    'input_size': 30,
     'num_classes': 3,
     })
 
+
 data_mode_config = cfg.Config({
-    'classify': True,
-    'perturb_entries': 3,
+    'classify': False,
+    'perturb_entries': 0.5,
     'perturb_mode': 'last',
     'perturb_value': 'min', #min, max, rand, <float>
     })
@@ -106,11 +109,7 @@ baseconfig = cfg.Config({
 # baseconfig['train.loss_mode'] = 'class'
 
 #%%
-# deltaconfigs = {'data.values.balanced': [True, False],
-#                 'net.input_mode': ['init', 'clamp'],
-#                 'net.beta': [10, 50]
-#                 }
-deltaconfigs = {}
+deltaconfigs = {'train.batch_size':[256,128], 'net.beta':[7., 9., 11., 13.]}
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
 saveroot = utils.initialize_savedir(baseconfig)
 
@@ -156,12 +155,12 @@ for config, label in zip(configs, labels):
     batch_size = config['train'].pop('batch_size')
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     if test_data:
-        test_loader = torch.utils.data.DataLoader(test_data, batch_size=1024)
+        test_loader = torch.utils.data.DataLoader(test_data, batch_size=50)
     else:
-        if batch_size < len(train_data):
-            test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
-        else:
-            test_loader = None
+        # if batch_size < len(train_data): #TODO: OOMs if using entire MNIST
+        #     test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
+        # else:
+        test_loader = None
 
     reg_fn = config['train'].pop('reg_fn')
     reg_rate = config['train'].pop('reg_rate')
@@ -193,9 +192,6 @@ for config, label in zip(configs, labels):
 
     # joblib.dump(logger, os.path.join(savedir, 'log.pkl'))
     torch.save(net, os.path.join(savedir, 'net.pt'))
-
-    print()
-
 
 #%% plot
 import plots
@@ -232,7 +228,7 @@ n_per_class = None
 debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 plots.plot_data_batch(debug_input, debug_target)
 
-state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
+state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
 plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True)
 
 #%%
@@ -242,7 +238,7 @@ debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_da
 num_steps_train = net.num_steps
 # net.num_steps = 2000#int(100/net.dt)
 # net.fp_thres = 1e-9
-state_debug_history = net(debug_input, clamp_mask=~debug_perturb_mask, debug=True)
+state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
 
 fig, ax = plt.subplots(2,2, sharex=True)
 ax = ax.flatten()

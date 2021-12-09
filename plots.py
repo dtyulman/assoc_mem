@@ -33,7 +33,7 @@ def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
 def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
                cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
     fig, ax = prep_axes(ax)
-    mat = mat.squeeze()
+    mat = mat.squeeze(dim=-1)
     try:
         mat = mat.cpu().detach().numpy()
     except:
@@ -93,7 +93,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=T
     key = 'f' if apply_nonlin else 'h'
     h = state_debug_history[-1][key].detach().to('cpu') #[B,N,1]
     assert len(h.shape)==3, 'Hidden activity must have three dimensions: [B,N,1]'
-    max_h_value, max_h_idx = torch.max(h.squeeze(), dim=1) #[B,N]-->([B],[B])
+    max_h_value, max_h_idx = torch.max(h.squeeze(dim=-1), dim=1) #[B,N]-->([B],[B])
 
     if n_per_class is None:
         max_h_idx, sort = torch.sort(max_h_idx)
@@ -147,7 +147,7 @@ def _plot_dynamics(var, steps=None, n_per_class=1, num_steps_train=None, legend=
 
 def plot_state_update_magnitude_dynamics(state_debug_history,
                                          n_per_class=1, num_steps_train=None, ax=None):
-    state_trajectory = get_trajectory_by_key(state_debug_history, 'state').numpy().squeeze(-1) #[T,B,M]
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'v').numpy().squeeze(-1) #[T,B,M]
     update_magnitude = np.linalg.norm(np.diff(state_trajectory, axis=0), axis=2)
     steps = np.array(range(1, len(state_trajectory)))
 
@@ -160,12 +160,12 @@ def plot_state_update_magnitude_dynamics(state_debug_history,
 def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None, ax=None):
     fig, ax = prep_axes(ax)
 
-    state_trajectory = get_trajectory_by_key(state_debug_history, 'state').numpy().squeeze(-1) #[T,B,M]
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'v').numpy().squeeze(-1) #[T,B,M]
     if targets is not None: #plot error instead of state
         title = 'Error (v-t)'
         state_trajectory = state_trajectory - targets.squeeze(-1).unsqueeze(0).numpy() #[T,B,M]-[B,M]
     else:
-        title = 'State'
+        title = 'State (v)'
 
     T,B,M = state_trajectory.shape
     num_steps_plotted = min(num_steps_plotted, T)
@@ -204,7 +204,7 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
 
 def plot_energy_dynamics(state_debug_history, net,
                          n_per_class=1, num_steps_train=None, ax=None):
-    state_trajectory = get_trajectory_by_key(state_debug_history, 'state') #[T,B,M]
+    state_trajectory = get_trajectory_by_key(state_debug_history, 'v') #[T,B,M]
     input = get_trajectory_by_key(state_debug_history, 'I')
     energy = net.energy(state_trajectory, input).squeeze(-1)
 
@@ -256,18 +256,18 @@ def get_trajectory_by_key(state_debug_history, key):
     return trajectory #[T,B,*] e.g. [T,B,M,1] or [T,B,N,1]
 
 
-def rows_to_images(M, vpix=None, hpix=None, drop_last=0, pad_nan=True):
-    """Convert a matrix M with R rows to a list of R vpix-by-hpix matrices (e.g. images).
+def rows_to_images(mat, vpix=None, hpix=None, drop_last=0, pad_nan=True):
+    """Convert a matrix mat with R rows to a list of R vpix-by-hpix matrices (e.g. images).
     Optionally discard the drop_last entries of each row before reshaping it."""
     if drop_last > 0:
-        M = M[:,:-drop_last]
-    length = M.shape[1]
+        mat = mat[:,:-drop_last]
+    length = mat.shape[1]
     vpix, hpix = length_to_rows_cols(length, vpix, hpix) #default to square-ish
 
     if pad_nan:
         padding = vpix*hpix - length
-        M = np.pad(M, ((0,0),(0,padding)), constant_values=float('nan'))
-    return [r.reshape(vpix,hpix) for r in M]
+        mat = np.pad(mat, ((0,0),(0,padding)), constant_values=float('nan'))
+    return [r.reshape(vpix,hpix) for r in mat]
 
 
 def images_to_grid(img_list, rows=None, cols=None, vpad=0, hpad=0):

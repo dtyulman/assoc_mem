@@ -27,8 +27,9 @@ class ModernHopfield(nn.Module):
         assert 0 < dropout < 1 or dropout is False
         self.dropout = dropout #only applies if net in in 'training' mode
 
-        self.beta = nn.Parameter(torch.tensor(beta), requires_grad=train_beta)
-        self.tau = torch.tensor(tau)
+        self.beta = nn.Parameter(torch.tensor(beta, dtype=torch.get_default_dtype()),
+                                 requires_grad=train_beta)
+        self.tau = torch.tensor(tau, dtype=torch.get_default_dtype())
 
         assert dt<=1, 'Step size dt should be <=1'
         self.dt = dt
@@ -78,13 +79,14 @@ class ModernHopfield(nn.Module):
         if self.training and self.dropout:
             batch_size, input_size, _ = input.shape #[B,M,1]
             self.dropout_mask = torch.rand(batch_size, self.hidden_size, 1) < self.dropout #[B.N,1]
+            self.dropout_mask = self.dropout_mask.to(next(self.parameters()).device)
 
         return state, external_current, clamp_mask, clamp_values
 
 
     def _maybe_dropout(self, f):
         if self.training and self.dropout:
-            f[self.dropout_mask] = 0
+            f = f * ~self.dropout_mask
         return f
 
 
@@ -92,7 +94,7 @@ class ModernHopfield(nn.Module):
         """input is either a [B,N,1]-dim tensor or a tuple (input, clamp_mask) where clamp_mask is
         a [B,N,1]-dim boolean tensor indicating which input units to clamp. clamp_value is inferred
         from input and clamp_mask as input[clamp_mask]. clamp_mask is ignored unless self.input_mode
-        is 'clamp'"""
+        contains 'clamp'"""
         self._maybe_normalize_weight()
         state, external_current, clamp_mask, clamp_values = self._parse_input(input) #[B,M,1],[B,M,1]
 

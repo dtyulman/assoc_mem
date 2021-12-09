@@ -100,7 +100,7 @@ class MNISTDataset(ClassifyDatasetBase):
         if downsample: #take every `downsample`th pixel vertically and horizontally
             self.data = self.data[:, ::downsample, ::downsample]
         num_samples, vpix, hpix = self.data.shape
-        self.data = self.data.view(num_samples, vpix*hpix, 1) #flatten
+        self.data = self.data.reshape(num_samples, vpix*hpix, 1) #flatten
         self._normalize(normalize) #maybe normalize
 
         self.input_size = self.data.shape[1]

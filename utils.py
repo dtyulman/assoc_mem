@@ -32,11 +32,16 @@ def initialize_savedir(baseconfig):
 def choose_device(dev_str):
     """If dev_str is 'cuda', returns 'cuda:X' where X is the gpu with the most free memory.
     """
+    assert dev_str.startswith('cuda') or dev_str=='cpu', "Device must be 'cuda:[number]' or 'cpu'"
     if dev_str == 'cuda':
+        if not torch.cuda.is_available():
+            warnings.warn('CUDA not available. Using CPU.')
+            return 'cpu'
+
         try:
             import pynvml
         except ImportError as e:
-            warnings.warn(e.msg + f'. Using default device: {dev_str}')
+            warnings.warn(e.msg + f'. Using default device: {dev_str}.')
             return dev_str
         best_dev_idx = 0
         best_mem_free = 0
