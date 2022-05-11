@@ -4,6 +4,8 @@ from copy import deepcopy
 
 #third-party
 import torch, joblib
+from torch import nn
+# from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
 #for my machine only TODO: remove
@@ -13,22 +15,22 @@ except FileNotFoundError as e:
     print(e.args)
 
 #custom
-import utils, data, training, networks
+import utils, data, training, networks, plots
 import configs as cfg
 #%%
 train_config = cfg.Config({
-    'class': 'SGDTrain', #FPTrain, SGDTrain
-    'batch_size': 256,
-    'verify_grad': False,
+    'class': 'FPTrain', #FPTrain, BPTrain
+    'batch_size': 4,
+    #FPTrain only
+    'verify_grad': 'bptt', #num, bptt, num+bptt
+    'approx': False, #False, first, first-heuristic, inv-heuristic
 
     'optim': {'class': 'Adam', #CustomOpt, Adam
-              # 'lr': 1e-3,
-
+              'lr': .05,
               #Adam only
-              # 'weight_decay': 0,
-              # 'amsgrad': False,
-
-              #for CustomOpt only
+              'weight_decay': 1e-9,
+              'amsgrad': False,
+              #CustomOpt only
               'lr_decay': 1.,
               'momentum': 0.999, #float, False
               'clip': False, #norm, value, False
@@ -41,32 +43,33 @@ train_config = cfg.Config({
     'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'full', #full, class
-    'acc_fn' : 'mae', #cls, L0, L1/mae
+    'acc_fn' : 'L0', #cls, L0, L1/mae
     'reg_fn': None, #L2, None
     'reg_rate': None,
 
-    'epochs': 1000,
+    'epochs': 1,
     'print_every': 10,
-    'sparse_log_factor': 1,
+    'sparse_log_factor': 5,
     'device': 'cuda', #cuda, cpu
     })
 
 net_config = cfg.Config({
-    'class': 'ModernHopfield',
+    'class': 'LargeAssociativeMem',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 225,
+    'hidden_size': 2,
     'init': 'random', #random, data_mean, inputs, targets
-    'normalize_weight': True,
-    'dropout': False, #float in (0,1), or False
-    'beta': 7.,
-    'train_beta': True,
-    'tau': 1.,
-    'normalize_input': False,
+    'normalize_weight': False,
+    'f': networks.Softmax(beta=0.1, train=True),
+    'g': networks.Spherical(),
+    'normalize_input': True, #normalizes post-perturbation (data.normalize does it before, g=Spherical does it at every step)
     'input_mode': 'clamp', #init, cont, init+cont, clamp
+    'tau': 1,
     'dt': .1,
-    'num_steps': 50000,
+    'num_steps': 1000,
+    'check_converged': True,
     'fp_mode': 'iter', #iter, del2
-    'fp_thres':1e-9,
+    'fp_thres': 0., #must be small or torch.allclose(FP_grad, BP_grad) fails
+    'dropout': False, #float in (0,1), or False
     })
 
 
@@ -74,7 +77,7 @@ data_values_config = cfg.Config({
     'class': 'MNISTDataset', #MNISTDataset, RandomDataset
     'include_test': True,
     'normalize' : 'data', #data, data+targets, False
-    'num_samples': None, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'num_samples': 4, #if None takes entire MNISTDataset, requires int for RandomDataset
     'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
@@ -82,16 +85,16 @@ data_values_config = cfg.Config({
     'downsample': False,
 
     #RandomDataset only
-    'distribution': 'bern', #bern, unif, gaus
-    'input_size': 30,
-    'num_classes': 3,
+    # 'distribution': 'bern', #bern, unif, gaus
+    # 'input_size': 30,
+    # 'num_classes': 3,
     })
 
 
 data_mode_config = cfg.Config({
     'classify': False,
     'perturb_entries': 0.5,
-    'perturb_mode': 'last',
+    'perturb_mode': 'last', #rand, first, last (note: rand mask same for whole batch)
     'perturb_value': 'min', #min, max, rand, <float>
     })
 
@@ -105,15 +108,55 @@ baseconfig = cfg.Config({
     })
 
 
-# baseconfig = cfg.load_config('./results/2021-07-27/proof_of_principle/baseconfig.txt')
-# baseconfig['train.loss_mode'] = 'class'
+deltaconfigs = {}
+mode = 'combinatorial'
 
 #%%
-deltaconfigs = {'train.batch_size':[256,128], 'net.beta':[7., 9., 11., 13.]}
-configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs)
-saveroot = utils.initialize_savedir(baseconfig)
+#small net small data
+# baseconfig['net.hidden_size'] = 25
+# baseconfig['train.batch_size'] = 25
+# baseconfig['train.epochs'] = 2
+# baseconfig['train.print_every'] = 10
+# baseconfig['data.values.num_samples'] = 25
+# baseconfig['data.values.include_test'] = False
 
+#small net big data
+# baseconfig['net.hidden_size'] = 25
+# baseconfig['train.batch_size'] = 128
+# baseconfig['train.epochs'] = 100
+# baseconfig['train.print_every'] = 100
+# baseconfig['data.values.num_samples'] = None
+# baseconfig['data.values.include_test'] = True
+
+#big net big data
+# baseconfig['net.hidden_size'] = 500
+# baseconfig['train.batch_size'] = 64
+# baseconfig['train.epochs'] = 25
+# baseconfig['train.print_every'] = 100
+# baseconfig['data.values.num_samples'] = None
+# baseconfig['data.values.include_test'] = True
+
+
+# deltas = [#train, approx,            beta_init,   train_beta
+#     # ['FPTrain',  True,  networks.Softmax(beta=1,    train=True)],  #FP_heuristic
+#     # ['FPTrain',  False, networks.Softmax(beta=1,    train=True)],  #FP_exact
+#     # ['BPTrain', False, networks.Softmax(beta=1,    train=True)],  #SGD
+#     # ['FPTrain',  True,  networks.Argmax()], #FP_inf
+# ]
+
+# deltaconfigs = {'train.class': [delta[0] for delta in deltas],
+#                 'train.approx': [delta[1] for delta in deltas],
+#                 'net.f': [delta[2] for delta in deltas]
+#                 }
+# mode = 'sequential'
+
+#%%
+configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs, mode=mode)
+saveroot = utils.initialize_savedir(baseconfig)
+device = None
 for config, label in zip(configs, labels):
+    torch.random.manual_seed(3)
+
     cfg.verify_config(config)
     config_copy = deepcopy(config)
     print(config)
@@ -135,6 +178,10 @@ for config, label in zip(configs, labels):
     net = NetClass(**config['net'])
     with torch.no_grad():
         if init == 'random':
+            # mean = 0.01
+            # std = 0.001
+            # print(f'OVERRIDING DEFAULT RANDOM INIT, mean={mean}, std={std}')
+            # net._W.data = torch.randn_like(net._W )*std + mean
             pass #happens by default inside the net class
         elif init == 'data_mean':
             net._W = train_data[:][0].mean(dim=0).tile(1,net.hidden_size).T
@@ -150,15 +197,17 @@ for config, label in zip(configs, labels):
 
 
     #training
-    device = utils.choose_device(config['train'].pop('device'))
+    if device is None:
+        device = utils.choose_device(config['train'].pop('device'))
     epochs = config['train'].pop('epochs')
     batch_size = config['train'].pop('batch_size')
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+
+    train_loader = data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
     if test_data:
-        test_loader = torch.utils.data.DataLoader(test_data, batch_size=50)
+        test_loader = data.DataLoader(test_data, batch_size=batch_size)
     else:
         # if batch_size < len(train_data): #TODO: OOMs if using entire MNIST
-        #     test_loader = torch.utils.data.DataLoader(train_data, batch_size=len(train_data))
+        #     test_loader = data.DataLoader(train_data, batch_size=len(train_data))
         # else:
         test_loader = None
 
@@ -174,10 +223,21 @@ for config, label in zip(configs, labels):
     optim_config = config['train'].pop('optim')
     optim_class = optim_config.pop('class')
     if optim_class == 'Adam':
-        optimizer = torch.optim.Adam(net.parameters(),
-                                     lr=optim_config.pop('lr', 1e-3),
-                                     weight_decay=optim_config.pop('weight_decay', 0),
-                                     amsgrad=optim_config.pop('amsgrad', False))
+        lr = optim_config.pop('lr', 1e-3)
+        if 'beta' in net.named_parameters():
+            params_except_beta = dict(net.named_parameters())
+            del params_except_beta['f.beta']
+            params_except_beta = params_except_beta.values()
+            optimizer = torch.optim.Adam([{'params': params_except_beta},
+                                          {'params': net.f.beta, 'lr':lr/10.}],
+                                         lr=lr,
+                                         weight_decay=optim_config.pop('weight_decay', 0),
+                                         amsgrad=optim_config.pop('amsgrad', False))
+        else:
+            optimizer = torch.optim.Adam(net.parameters(),
+                                         lr=lr,
+                                         weight_decay=optim_config.pop('weight_decay', 0),
+                                         amsgrad=optim_config.pop('amsgrad', False))
     elif optim_class == 'CustomOpt':
         optimizer = training.CustomOpt(net, **optim_config)
 
@@ -191,72 +251,62 @@ for config, label in zip(configs, labels):
     logger.add_text('config', str(config_copy))
 
     # joblib.dump(logger, os.path.join(savedir, 'log.pkl'))
+    net.to('cpu')
     torch.save(net, os.path.join(savedir, 'net.pt'))
 
-#%% plot
-import plots
-import matplotlib.pyplot as plt
+# %% plot
+# plots.plot_loss_acc(logger)
 
-#TODO: plot v-t averaged over B
+# #%%
+# plots.plot_weights(net, drop_last=10)
 
-# title = '{net}{hid} W:{norm} $\\beta$={bet} $\\tau$={tau} in:{inp}\n' \
-#         '{trn} B={bat} lr={lr} L:{loss} MNIST{sub}{dnorm}'.format(
-#             net = 'MH',
-#             hid = net.hidden_size,
-#             norm = "nml" if net.normalize_weight else 'raw',
-#             bet = net.beta,
-#             tau = net.tau,
-#             inp = net.input_mode,
-#             trn = trainer.name[:2],
-#             bat = train_loader.batch_size,
-#             lr = trainer.lr,
-#             loss = trainer.loss_mode,
-#             sub = f'{subset}' if subset else '',
-#             dnorm = ':nml' if config['data.normalize'] else '',
-#             )
-title = ''
-net.to('cpu')
-#%%
-plots.plot_loss_acc(logger)
+# #%%
+# n_per_class = 10
+# debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
+# plots.plot_data_batch(debug_input, debug_target)
 
-#%%
-plots.plot_weights(net)
+# state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
+# plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True)
 
+# #%%
+# n_per_class = 1
+# debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 
-#%%
-n_per_class = None
-debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
-plots.plot_data_batch(debug_input, debug_target)
-
-state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
-plots.plot_hidden_max_argmax(state_debug_history, n_per_class, apply_nonlin=True)
-
-#%%
-n_per_class = 1
-debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
-
-num_steps_train = net.num_steps
-# net.num_steps = 2000#int(100/net.dt)
+# num_steps = net.num_steps
+# fp_thres = net.fp_thres
+# check_converged = net.check_converged
+# net.num_steps = 1e10#int(100/net.dt)
 # net.fp_thres = 1e-9
-state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
+# net.check_converged = True
 
-fig, ax = plt.subplots(2,2, sharex=True)
-ax = ax.flatten()
+# state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
 
-plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps_train, ax=ax[0])
-plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps_train, ax=ax[1])
-plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps_train, ax=ax[2])
-plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
+# net.num_steps = num_steps
+# net.fp_thres = fp_thres
+# net.check_converged = check_converged
 
-[a.set_xlabel('') for a in ax[0:2]]
-[a.legend_.remove() for a in ax[0:-1]]
-fig.suptitle(title)
-plots.scale_fig(fig, 1.5, 1.5)
-fig.tight_layout()
+# fig, ax = plt.subplots(2,2, sharex=True)
+# ax = ax.flatten()
 
-#%%
-fig, ax = plt.subplots(2,1, sharex=True, sharey=True)
-plots.plot_state_dynamics(state_debug_history, ax=ax[0])
-plots.plot_state_dynamics(state_debug_history, targets=debug_target, ax=ax[1]) #plot error instead of state
-plots.scale_fig(fig, 1.6, 3.5)
-fig.tight_layout()
+# plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps, ax=ax[0])
+# # plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps, ax=ax[1])
+# plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps, ax=ax[2])
+# plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
+
+# [a.set_xlabel('') for a in ax[0:2]]
+# # [a.legend_.remove() for a in ax[0:-1]]
+# plots.scale_fig(fig, 1.5, 1.5)
+# fig.tight_layout()
+
+# #%%
+# fig, ax = plt.subplots(2,1, sharex=True, sharey=True)
+# plots.plot_state_dynamics(state_debug_history, ax=ax[0])
+# plots.plot_state_dynamics(state_debug_history, targets=debug_target, ax=ax[1]) #plot error instead of state
+# plots.scale_fig(fig, 1.6, 3.5)
+# fig.tight_layout()
+
+# #%%
+# # beta = net.f.beta.item()
+# # net.f.beta.data = torch.tensor(9.)
+# plots.plot_fixed_points(net, num_fps=100, drop_last=0)
+# # net.f.beta.data = torch.tensor(beta)

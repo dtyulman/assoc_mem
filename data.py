@@ -118,7 +118,7 @@ def get_data(**kwargs):
         if DatasetClass == MNISTDataset:
             test_data = DatasetClass(test=True, **kwargs)
         elif DatasetClass == RandomDataset:
-            test_data =  DatasetClass(**kwargs)
+            test_data = DatasetClass(**kwargs)
 
     return train_data, test_data
 
@@ -170,7 +170,12 @@ class AssociativeDataset(Dataset):
 
         #perturb_mask indicates which entries will be perturbed
         if self.perturb_mode == 'rand':
-            perturb_mask = torch.rand_like(datapoint) < self.perturb_frac
+            if len(datapoint.shape)==3: #[B,M,1]
+                perturb_mask = torch.rand_like(datapoint[0]) < self.perturb_frac
+                perturb_mask = perturb_mask.tile(datapoint.shape[0], 1, 1)
+            elif len(datapoint.shape)==2: #[M,1]
+                perturb_mask = torch.rand_like(datapoint) < self.perturb_frac
+
         elif self.perturb_mode in ['first', 'last']:
             #TODO: only need to compute perturb_mask once in this case, and can directly store
             #inputs as perturbed targets instead of perturbing on-the-fly
@@ -221,6 +226,7 @@ def get_aa_data(data_kwargs, aa_kwargs):
 
 def get_aa_debug_batch(train_data, select_classes='all', n_per_class=None):
     debug_data = deepcopy(train_data) #train_data is an AssociativeDataset object
+    print('copied')
     debug_data.dataset = filter_classes(debug_data.dataset, select_classes=select_classes,
                                         n_per_class=n_per_class)
     return next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))
@@ -251,3 +257,36 @@ def filter_classes(dataset, select_classes='all', n_per_class=None, sort_by_clas
     filtered_dataset.data = dataset.data[selected_idx]
     filtered_dataset.targets = dataset.targets[selected_idx]
     return filtered_dataset
+
+
+class DataLoader():
+    def __init__(self, dataset, batch_size=1, shuffle=False):
+        self.dataset = deepcopy(dataset)
+        del dataset
+        torch.cuda.empty_cache()
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.reset()
+
+
+    def reset(self):
+        if self.shuffle:
+            perm = torch.randperm(len(self.dataset))
+            self.dataset.dataset.data = self.dataset.dataset.data[perm]
+            self.dataset.dataset.targets = self.dataset.dataset.targets[perm]
+        self.i = 0
+        self.j = min(self.i + self.batch_size, len(self.dataset))
+
+
+    def __next__(self):
+        if self.i < len(self.dataset):
+            batch = self.dataset[self.i : self.j]
+            self.i = self.j
+            self.j = min(self.i + self.batch_size, len(self.dataset))
+            return batch
+        else:
+            self.reset()
+            raise StopIteration()
+
+    def __iter__(self):
+        return self

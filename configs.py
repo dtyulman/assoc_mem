@@ -2,6 +2,8 @@ import itertools, warnings
 from collections.abc import MutableMapping, Mapping
 from copy import deepcopy
 
+import networks
+
 
 class Config(MutableMapping):
     """Nested dictionary that can be accessed by dot-separated keys
@@ -63,26 +65,31 @@ class Config(MutableMapping):
 def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     """With baseconfig as the default, return a list of configs with the entries in deltaconfigs.keys()
     looped over the corresponding lists in deltaconfigs.values()"""
-    configs = []
-    labels = []
+
     assert all([param in baseconfig for param in deltaconfigs]), \
         'Varied parameters must exist in baseconfig'
+
     if mode == 'combinatorial':
-        for values in itertools.product(*deltaconfigs.values()):
-            config = deepcopy(baseconfig)
-            label = []
-            for param, value in zip(deltaconfigs.keys(), values):
-                config[param] = value
-                label.append(f'{param.rpartition(".")[-1]}={value}')
-            configs.append(config)
-            labels.append(' '.join(label))
+        values_unzipped = itertools.product(*deltaconfigs.values())
     elif mode == 'sequential':
         len_params_list = len(list(deltaconfigs.values())[0])
         assert all([len(values)==len_params_list for values in deltaconfigs.values()]), \
             'Parameter lists must be of same length'
-        raise NotImplementedError()
+        values_unzipped = zip(*deltaconfigs.values())
     else:
         raise ValueError(f'Invalid mode: {mode}')
+
+    configs = []
+    labels = []
+    for values in values_unzipped:
+        config = deepcopy(baseconfig)
+        label = []
+        for param, value in zip(deltaconfigs.keys(), values):
+            config[param] = value
+            label.append(f'{param.rpartition(".")[-1]}={value}')
+        configs.append(config)
+        labels.append(' '.join(label))
+
     return configs, labels
 
 
@@ -127,11 +134,20 @@ def verify_config(config, mode='raise'):
             'data.values.normalize': ['data', False]
             }
 
-    if config['net.train_beta']:
+    if config['net.f'] == networks.Softmax() and config['net.f'].beta.requires_grad():
         constraint.update({'train.optim.beta_increment': False})
+
+    if config['net.g'] == networks.Spherical():
+        constraint.update({'net.normalize_input': False}) #not really an issue, but it's redundant
+        if config['data.mode.classify']:
+            constraint.update({'data.normalize': 'data+targets'})
+        else:
+            constraint.update({'data.normalize': 'data'})
 
     if config['net.init'] in ['inputs', 'targets']:
         assert config['data.values.num_samples'] >= config['net.hidden_size']
+
+    assert config['data.values.num_samples'] is None or config['train.batch_size'] <= config['data.values.num_samples']
 
     return verify_items(config, constraint)
 

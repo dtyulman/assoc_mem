@@ -32,7 +32,7 @@ def initialize_savedir(baseconfig):
 def choose_device(dev_str):
     """If dev_str is 'cuda', returns 'cuda:X' where X is the gpu with the most free memory.
     """
-    assert dev_str.startswith('cuda') or dev_str=='cpu', "Device must be 'cuda:[number]' or 'cpu'"
+    assert dev_str.startswith('cuda') or dev_str=='cpu', "Device must be 'cuda[:number]' or 'cpu'"
     if dev_str == 'cuda':
         if not torch.cuda.is_available():
             warnings.warn('CUDA not available. Using CPU.')
@@ -53,6 +53,7 @@ def choose_device(dev_str):
                 best_mem_free = mem_free
                 best_dev_idx = i
         dev_str = f'cuda:{best_dev_idx}'
+    print(f'Using device: {dev_str}')
     return dev_str
 
 

@@ -6,45 +6,291 @@ import torch.nn.functional as F
 from torch import nn
 
 
-class ModernHopfield(nn.Module):
-    """Ramsauer et al 2020"""
-    def __init__(self, input_size, hidden_size, beta=10., train_beta=False, tau=1.,
+######################
+### Nonlinearities ###
+######################
+class Nonlinearity(nn.Module):
+    """Base class"""
+    def __init__(self):
+        #for every trainable parameter in the nonlinearity, must add a function
+        #called D_<param>(x) that computes partial-f/partial-<param>
+        super().__init__()
+
+    def __call__(self, x, *args, **kwargs):
+        return self._function(x, *args, **kwargs)
+
+    def _function(self, x):
+        raise NotImplementedError()
+
+    def L(self, x):
+        """Lagrangian function of the neural activity,
+        defined s.t. dL/dx_i = f(x)_i """
+        raise NotImplementedError()
+
+    def J(self, x):
+        """Jacobian of the function f: J_ij = df_i/dx_j, evaluated at x"""
+        raise NotImplementedError()
+
+
+
+class Power(Nonlinearity):
+    def __init__(self, n):
+        super().__init__()
+        self.n = n
+
+    def _function(self, x):
+        return torch.pow(x, self.n)
+
+    def L(self, x):
+        """Lagrangian function of the neural activity,
+        defined s.t. dL/dx_i = f(x)_i """
+        raise NotImplementedError()
+
+    def J(self, x):
+        """Jacobian of the function f: J_ij = df_i/dx_j, evaluated at x"""
+        raise NotImplementedError()
+
+    def D_n(self, x):
+        """ del f / del n = #TODO
+        Partial derivative of f wrt parameter n"""
+        raise NotImplementedError()
+
+
+class Hardmax(Nonlinearity):
+    """Softmax with beta = inf
+    i.e. zero-order approximation of Softmax
+    """
+    def _function(self, x):
+        argmax = torch.argmax(x, dim=-2)
+        onehot = F.one_hot(argmax, num_classes=x.shape[-2]).transpose(-2,-1)
+        return onehot.float()
+
+
+    def J(self, x):
+        """Jacobian of the function f: J_ij = df_i/dx_j, evaluated at x"""
+        if len(x.shape) == 3:
+            return torch.zeros(x.shape[0], x.shape[-2], x.shape[-2])
+        elif len(x.shape) == 2:
+            return torch.zeros(x.shape[-2], x.shape[-2])
+        else:
+            raise ValueError()
+
+
+class Softmax_1(Hardmax):
+    """
+    First-order approximation of the Softmax function
+    """
+    def __init__(self, beta=1., train=False):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor(float(beta)), requires_grad=train)
+
+    def __str__(self):
+        return f'Softmax_1(beta={self.beta}, train={self.beta.requires_grad})'
+
+    def __repr__(self):
+        return self.__str__()
+
+    def _function(self, x, f0=None, eps=None):
+        if f0 is None:
+            f0 = self._zeroth_order(x) #zeroth order correction
+        if eps is None:
+            eps = self._eps(x) #perturbative variable
+        return (1-eps.sum())*f0 + eps #f = f0 + (I-E)*eps
+
+    def _eps(self, x):
+        return torch.exp(self.beta*(x - x.max(dim=1, keepdim=True)[0]))
+
+    def _zeroth_order(self, x):
+        return super(x)
+
+    def _FF(self, f0, eps):
+        FF = eps.squeeze(-1).diag_embed()
+        FF -= eps @ f0.transpose(-2,-1)
+        FF -= eps.transpose(-2,-1) @ f0
+        FF += eps.sum() * f0 @ f0.transpose(-2,-1)
+        return FF
+
+    def J(self, x, f0=None, eps=None):
+        if f0 is None:
+            f0 = self._zeroth_order(x)
+        if eps is None:
+            eps = self._eps(x)
+        return self.beta*self._FF(x, f0, eps)
+
+    def D_beta(self, x, f0=None, eps=None, FF=None):
+        if f0 is None:
+            f0 = self._zeroth_order(x)
+        if eps is None:
+            eps = self._eps(x)
+        if FF is None:
+            FF = self._FF(x, f0, eps)
+        return FF @ x
+
+
+class Softmax(Nonlinearity):
+    def __init__(self, beta=1., train=False):
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor(float(beta)), requires_grad=train)
+
+    def __str__(self):
+        return f'Softmax(beta={self.beta}, train={self.beta.requires_grad})'
+
+    def __repr__(self):
+        return self.__str__()
+
+    def _function(self, x):
+        """f_i = softmax(x)_i"""
+        return F.softmax(self.beta*x, dim=-2) #[B,N,1] or [N,1]
+
+    def L(self, x):
+        """f(x)_i = dL/dx_i"""
+        return torch.logsumexp(self.beta*x, -2)/self.beta #[B,N,1]->[B,1] or #[N,1]->[1]
+
+    def J(self, x, f=None, FF=None):
+        """J_f =  beta*(diag(f(x)) - f(x)*f(x)^T) Jacobian of f evaluted at x.
+        Pass in FF=self._FF(x) if you have it cached to avoid re-computing"""
+        if FF is None:
+            FF = self._FF(x, f)
+        return self.beta * FF #[B,N,N]
+
+    def D_beta(self, x, f=None, FF=None):
+        """ del f / del beta = (diag(f(x)) - f(x)*f(x)^T) * x
+        Partial derivative of f wrt parameter beta. Pass in FF=self._FF(x) if you have it cached"""
+        if FF is None:
+            FF = self._FF(x, f)
+        return FF @ x #[B,N,N]@[B,N,1]->[B,N,1]
+
+    def _FF(self, x, f=None):
+        """ diag(f(x)) - f(x)*f(x)^T
+        Helper for computing Jacobian and partial. Pass in f=f(x) if you have it cached"""
+        if f is None:
+            f = self(x)
+        #in-place helps with OOM
+        FF = f.squeeze(-1).diag_embed() #[B,N,1] -> [B,N,N]
+        FF -= f @ f.transpose(1, 2) #[B,N,N]-[B,N,1]@[B,1,N] -> [B,N,N]
+        return FF
+
+
+class Identity(Nonlinearity):
+    def _function(self, x):
+        """f_i = x_i"""
+        return x #[B,M,1] or [M,1]
+
+    def L(self, x):
+        """L = 1/2 x^T*x --> dL/dx_i = x_i"""
+        xx = x.transpose(-2,-1) @ x #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
+        return 0.5*xx.squeeze(-2) #[B,1,1]->[B,1] or #[1,1]->[1]
+
+    def J(self, x, **kwargs):
+        return eye_like(x)
+
+
+class Spherical(Nonlinearity):
+    def __init__(self, centering=False):
+        """If centering is True, equivalent to LayerNorm (see Tang and Kopp 2021)"""
+        super().__init__()
+        self.centering = centering
+
+    def __str__(self):
+        return f'Spherical(centering={self.centering})'
+
+    def _function(self, x, Z=None):
+        """f_i = (x_i - m)/||x-m||, where m=mean(x) if centering==True, else 0"""
+        if self.centering:
+            x = x - x.mean(dim=-2, keepdim=True) #[B,M,1] or [M,1]
+        if Z is None:
+            Z = self._norm(x)
+        return  x / Z
+
+    def L(self, x):
+        """f(x)_i = dL/dx_i"""
+        return self._norm(x) #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
+
+    def J(self, x, f=None, Z=None):
+        if self.centering:
+            raise NotImplementedError()
+        if Z is None:
+            Z = self._norm(x)
+        if f is None:
+            f = self(x, Z)
+        return (eye_like(f) - f@f.transpose(-2,-1))/Z
+
+    def _norm(self, x):
+        """||x|| = sqrt((x**2).sum(dim=-2)"""
+        return torch.linalg.vector_norm(x, dim=-2, keepdim=True)
+
+
+###########
+# Helpers #
+###########
+def eye_like(x, **kwargs):
+    """x is either [M,1] or [B,M,1]"""
+    eye = torch.eye(x.shape[-2], device=x.device, **kwargs) #[M,M]
+    if len(x.shape)==3: #x is [B,M,1]
+        eye = eye.expand(x.shape[0], -1, -1) #[B,M,M]
+    return eye
+
+
+############
+# Networks #
+############
+class LargeAssociativeMem(nn.Module):
+    """
+    Krotov and Hopfield 2021
+    Setting f=Softmax(), g=Identity(), and dt=tau, reduces to Ramsauer et al. 2020
+    """
+    def __init__(self, input_size, hidden_size, f=Softmax(beta=1, train=False), g=Identity(), tau=1.,
                  normalize_weight=False, dropout=False, normalize_input=False, input_mode='init',
-                 num_steps=None, dt=1., fp_thres=0.001, fp_mode='iter', **kwargs):
+                 num_steps=float('inf'), dt=0.1, check_converged=True, fp_thres=0.001, fp_mode='iter',
+                 **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
             warnings.warn(f'Ignoring unused ModernHopfield kwargs: {kwargs}')
+        self._check_parameters(normalize_weight, dropout, normalize_input, input_mode, dt, fp_mode)
 
         super().__init__()
-        self.input_size = input_size # M
-        self.hidden_size = hidden_size # N
+        self.M = input_size
+        self.N = hidden_size
 
-        self._W = nn.Parameter(torch.zeros(self.hidden_size, self.input_size)) #[N,M]
+        self.g = g #input nonlin
+        self.f = f #hidden nonlin
+
+        self._W = nn.Parameter(torch.zeros(self.N, self.M))
         nn.init.xavier_normal_(self._W)
-        assert normalize_weight in [True, False]
         self.normalize_weight = normalize_weight
         self._maybe_normalize_weight()
-        assert 0 < dropout < 1 or dropout is False
+
         self.dropout = dropout #only applies if net in in 'training' mode
 
-        self.beta = nn.Parameter(torch.tensor(beta, dtype=torch.get_default_dtype()),
-                                 requires_grad=train_beta)
-        self.tau = torch.tensor(tau, dtype=torch.get_default_dtype())
-
-        assert dt<=1, 'Step size dt should be <=1'
-        self.dt = dt
-        self.num_steps = int(1/self.dt) if num_steps is None else int(num_steps)
-
-        assert fp_mode in ['iter'], f"Invalid fixed point mode: '{fp_mode}'" #TODO: 'del2'
+        self.tau = torch.tensor(float(tau))
+        self.dt = float(dt)
+        self.num_steps = num_steps
+        self.check_converged = check_converged
+        self.fp_thres = float(fp_thres)
         self.fp_mode = fp_mode
-        self.fp_thres = fp_thres
 
         self.normalize_input = normalize_input
-        self.input_mode = input_mode.lower()
+        self.input_mode = input_mode
+
+        #hack: store final v before output g(v) during forward b/c needed for Jg
+        self.v_last = None
+
+
+    def _check_parameters(self, normalize_weight, dropout, normalize_input,
+                          input_mode, dt, fp_mode):
+        assert normalize_weight in [True, False]
+        assert 0 < dropout < 1 or dropout is False
+        assert normalize_input in [True, False]
+        assert dt<=1, 'Step size dt should be <=1'
+
+        assert fp_mode in ['iter', 'del2'], f"Invalid fixed point mode: '{fp_mode}'"
+        if fp_mode == 'del2':
+            raise NotImplementedError()
+
         input_modes = ['init', 'cont', 'clamp'] #valid modes are all combinations of these
         valid_input_modes = chain.from_iterable(combinations(input_modes, k) for k in range(1,len(input_modes)+1))
         valid_input_modes = ['+'.join(m) for m in valid_input_modes]
-        assert self.input_mode in valid_input_modes, f"Invalid input mode: '{input_mode}'"
+        assert input_mode in valid_input_modes, f"Invalid input mode: '{input_mode}'"
 
 
     def _maybe_normalize_weight(self):
@@ -64,24 +310,24 @@ class ModernHopfield(nn.Module):
         if self.normalize_input:
             input /= input.norm(dim=1, keepdim=True)
 
-        state = torch.zeros_like(input)
+        v = torch.randn_like(input)/100
         external_current = torch.zeros_like(input)
         clamp_values = None
         if 'init' in self.input_mode:
-            state = input
+            v = input
         if 'cont' in self.input_mode:
             external_current = input
         if 'clamp' in self.input_mode:
             assert clamp_mask is not None
             clamp_values = input[clamp_mask]
-            state[clamp_mask] = clamp_values
+            v[clamp_mask] = clamp_values
 
         if self.training and self.dropout:
             batch_size, input_size, _ = input.shape #[B,M,1]
-            self.dropout_mask = torch.rand(batch_size, self.hidden_size, 1) < self.dropout #[B.N,1]
+            self.dropout_mask = torch.rand(batch_size, self.hidden_size, 1) < self.dropout #[B,N,1]
             self.dropout_mask = self.dropout_mask.to(next(self.parameters()).device)
 
-        return state, external_current, clamp_mask, clamp_values
+        return v, external_current, clamp_mask, clamp_values
 
 
     def _maybe_dropout(self, f):
@@ -96,144 +342,78 @@ class ModernHopfield(nn.Module):
         from input and clamp_mask as input[clamp_mask]. clamp_mask is ignored unless self.input_mode
         contains 'clamp'"""
         self._maybe_normalize_weight()
-        state, external_current, clamp_mask, clamp_values = self._parse_input(input) #[B,M,1],[B,M,1]
+        v, external_current, clamp_mask, clamp_values = self._parse_input(input) #[B,M,1],[B,M,1]
 
         if debug:
-            state_debug_history = []
+            full_state_history = []
         update_magnitude = float('inf')
-        step = 0
-        while update_magnitude > self.fp_thres and step < self.num_steps:
-            prev_state = state
-            state = self.update_state(prev_state, external_current, clamp_mask, clamp_values, debug=debug) #[B,M,1]
-            step += 1
+        current_step = 0
+        while update_magnitude > self.fp_thres and current_step < self.num_steps:
+            v_prev = v
+            v = self.step(v_prev, external_current, clamp_mask, clamp_values, debug=debug) #[B,M,1]
+            current_step += 1
 
-            if debug: #state is actually state_debug
-                state_debug_history.append(state) #store it
-                state = state['v_next'] #extract the actual state from the dict
+            if debug: #v is actually full_state dict (see step() method)
+                full_state_history.append(v) #store it
+                v = v['v_next'] #extract the actual v from the dict
 
-            #check convergence
             with torch.no_grad():
-                update_magnitude = (prev_state-state).norm()
-                if step >= self.num_steps and update_magnitude > self.fp_thres:
+                update_magnitude = (v_prev-v).norm()
+                if self.check_converged and current_step >= self.num_steps and update_magnitude > self.fp_thres:
                     warnings.warn('Not converged: '
                           f'(update={update_magnitude}, fp_thres={self.fp_thres})')
 
         if debug:
-            return state_debug_history
-        return state
+            return full_state_history
 
-    # def forward(self, input, debug=False):
-    #     if debug:
-    #         assert self.fp_mode == 'iter', "Debug logging not implemented for fp_mode=='del2'"
-    #         state_debug_history = []
-
-    #     p0 = input #[B,M,1]
-    #     for step in range(self.num_steps):
-    #         p1 = self.update_state(p0, debug=debug) #[B,M,1]
-    #         if self.fp_mode=='del2': #like scipy.optimize.fixed_point() w/ use_accel=True
-    #https://github.com/scipy/scipy/blob/v1.7.0/scipy/optimize/minpack.py#L899-L942
-    #             p2 = self.update_state(p1)
-    #             d = p2 - 2.*p1 + p0
-    #             del2 = p0 - torch.square(p1-p0)/d
-    #             p = torch.where(d!=0, del2, p2) #TODO:don't evaluate del2 where d!=0
-    #         else:
-    #             p = p1
-    #         if debug: #state is actually state_debug
-    #             state_debug_history.append(p) #store it
-    #             p = p['state'] #extract the actual state from the dict
-    #         update_magnitude = (p0-p).norm()
-    #         if update_magnitude < self.fp_thres:
-    #             break
-    #         p0 = p
-
-    #     if step >= self.num_steps:
-    #         print('Warning: reached max num steps without convergence: '
-    #               f'(update={update_magnitude}, fp_thres={self.fp_thres})')
-    #     if debug:
-    #         return state_debug_history
-    #     return p
+        self.v_last = v
+        return self.g(v)
 
 
-    def update_state(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
+    def step(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
+        """ v(t+dt) = v(t) + dt/tau_v [ -v(t) + W*f(h) ]
+
+        Discretized version of continuous dynamics with tau_h --> 0 (i.e. h = Wg)
+            tau_h*dh/dt = -h + W*g(v)
+            tau_v*dv/dt = -v + W^T*f(h) + I
         """
-        Continuous: tau*dv/dt = -v + W*softmax(W^T*v)
-        Discretized: v(t+dt) = v(t) + dt/tau [-v(t) + W*softmax(W^T*v(t))]
-        """
-        h = self.W @ self._g(v) #[N,M],[B,M,1]->[B,N,1]
-        f = self._maybe_dropout(self._f(h)) #[B,N,1]
-        v_instant = self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
-        v_next = v + (self.dt/self.tau)*(v_instant - v) #[B,M,1]
-        #     = (1-dt/tau)*v + (dt/tau)*v_instant
+        h = self.compute_hidden(self.g(v))
+        f = self._maybe_dropout(self.f(h)) #[B,N,1]
+        v_instant = self.compute_feature(f, I)
+        v_next = v + (self.dt/self.tau)*(-v + v_instant) #[B,M,1]
 
-        if 'clamp' in self.input_mode:
-            #overwrite any updates to clamped units
+        if 'clamp' in self.input_mode: #overwrite any updates to clamped units
             v_next[clamp_mask] = clamp_values
 
-        #Can also do it without overwriting like this but it's significantly slower
-        #     v_next = torch.zeros_like(v)
-        #     v_next[clamp_mask] = v[clamp_mask]
-        #     B,N = v.shape[0], self.W.shape[0]
-        #     Wt_eff = self.W.t().expand(B,-1,-1)[~clamp_mask.squeeze()].reshape(B,-1,N)
-        #     v_instant = Wt_eff @ f + I[~clamp_mask.squeeze()].reshape(B,-1,1) #[B,Md,N],[B,N,1]->[B,Md,1]
-        #     v_next[~clamp_mask] = v[~clamp_mask] + (self.dt/self.tau)*(v_instant.flatten() - v[~clamp_mask]) #[B,M,1]
-
-
         if debug:
-            state_debug = {}
-            for key in ['I', 'h', 'f', 'v_instant', 'v_next', 'v']:
+            full_state = {}
+            for key in ['v', 'I', 'h', 'f', 'v_instant', 'v_next']:
                 #TODO: should be storing v_next *before* update? (only matters for 'cont' input_mode)
-                state_debug[key] = locals()[key].detach()
-            return state_debug
+                full_state[key] = locals()[key].detach()
+            return full_state
         return v_next
 
 
-    @torch.no_grad()
-    def energy(self, v, I=torch.tensor(0.)):
-        #general:
-        # g = self._g(v)
-        # h = self._h(g)
-        # f = self._f(h)
-        # Lv = self._Lv(v)
-        # Lh = self._Lh(h)
-
-        # vg = ((v).transpose(-2,-1) @ g).squeeze(-2)
-        # hf = (h.transpose(-2,-1) @ f).squeeze(-2)
-        # fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
-        # E = (vg - Lv) + (hf - Lh) - fWg
-
-        #assuming f=softmax, g=id
-        vv = ((v/2. - I).transpose(-2,-1) @ v).squeeze(-2)
-        lse = torch.logsumexp(self.beta*self.W@v, -2)/self.beta
-        E = vv - lse
-        return E
-
-
-    def _h(self, g):
+    def compute_hidden(self, g):
         """h_u = \sum_i W_ui*g_i, ie. h = W*g"""
         return self.W @ g #[N,M],[B,M,1]->[B,N,1]
 
 
-    def _f(self, h):
-        """f_u = f(h)_u = softmax(h)_u"""
-        return F.softmax(self.beta * h, dim=-2) #[B,N,1] or [N,1]
-
-
-    def _v(self, f, I=torch.tensor(0.)):
+    def compute_feature(self, f, I=torch.tensor(0.)):
         """v_i = \sum_u W_iu*f_u + I_i, ie. v = W^T*f + I """
         return self.W.t() @ f + I #[M,N],[B,N,1]->[B,M,1]
 
 
-    def _g(self, v):
-        """g_i = g(v)_i = v_i"""
-        return v #[B,M,1] or [M,1]
+    @torch.no_grad()
+    def energy(self, v, I=torch.tensor(0.)):
+        g = self.g(v)
+        h = self.compute_hidden(g)
+        f = self.f(h)
+        Lv = self.g.L(v)
+        Lh = self.f.L(h)
 
-
-    def _Lh(self, h):
-        """f_u(h) = dLh/dh_u"""
-        return torch.logsumexp(self.beta*h, -2)/self.beta #[B,N,1]->[B,1] or #[N,1]->[1]
-
-
-    def _Lv(self, v):
-        """g_i(v) = dLv/dv_i"""
-        vv = v.transpose(-2,-1) @ v #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
-        return 0.5*vv.squeeze(-2) #[B,1,1]->[B,1] or #[1,1]->[1]
+        vg = ((v).transpose(-2,-1) @ g).squeeze(-2)
+        hf = (h.transpose(-2,-1) @ f).squeeze(-2)
+        fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
+        E = (vg - Lv) + (hf - Lh) - fWg
+        return E

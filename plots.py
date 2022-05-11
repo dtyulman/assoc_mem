@@ -67,7 +67,25 @@ def plot_data_batch(inputs, targets, ax=None):
     return axs
 
 
-def plot_weights(net=None, _W=None, W=None, ax=None):
+def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0):
+    hidden_size, input_size = net.W.shape #[N,M]
+    inputs = torch.rand(num_fps, input_size, 1)
+
+    num_steps = net.num_steps
+    fp_thres = net.fp_thres
+    net.num_steps = 10000
+    net.fp_thres = 1e-10
+
+    outputs = net(inputs)
+
+    net.num_steps = num_steps
+    net.fp_thres = fp_thres
+
+    return _plot_rows(outputs, drop_last=drop_last, title='Fixed points')
+
+
+
+def plot_weights(net=None, _W=None, W=None, drop_last=0, ax=None):
     if net is not None:
         assert _W is None and W is None, 'Do not provide weight matrix if passing in net object'
         _W = net._W
@@ -76,13 +94,13 @@ def plot_weights(net=None, _W=None, W=None, ax=None):
 
     if W is not None:
         fig, ax = prep_axes(ax,1,2, sharex=True, sharey=True)
-        _plot_rows(_W, ax=ax[0], title='_W (raw)')
-        _plot_rows(W, ax=ax[1], title='W (normalized)')
+        _plot_rows(_W, ax=ax[0], drop_last=drop_last, title='_W (raw)')
+        _plot_rows(W, ax=ax[1], drop_last=drop_last, title='W (normalized)')
         scale_fig(fig, 1.5)
     else:
         fig, ax = prep_axes(ax)
-        _plot_rows(_W, title='Raw (no normalization)', ax=ax)
-    fig.tight_layout()
+        _plot_rows(_W, drop_last=drop_last, title='Raw (no normalization)', ax=ax)
+    # fig.tight_layout()
 
     return ax
 
