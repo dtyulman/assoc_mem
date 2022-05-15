@@ -134,15 +134,21 @@ def verify_config(config, mode='raise'):
             'data.values.normalize': ['data', False]
             }
 
-    if config['net.f'] == networks.Softmax() and config['net.f'].beta.requires_grad():
+    if type(config['net.f']) == networks.Softmax and config['net.f'].beta.requires_grad:
         constraint.update({'train.optim.beta_increment': False})
 
-    if config['net.g'] == networks.Spherical():
-        constraint.update({'net.normalize_input': False}) #not really an issue, but it's redundant
+    if type(config['net.g']) == networks.Spherical:
         if config['data.mode.classify']:
-            constraint.update({'data.normalize': 'data+targets'})
+            constraint.update({'data.values.normalize': 'data+targets'})
         else:
-            constraint.update({'data.normalize': 'data'})
+            constraint.update({'data.values.normalize': 'data'})
+
+    if config['net.input_mode'] == 'clamp':
+        #normalizes after perturbation, so clamps an incorrectly normalized value
+        constraint.update({'net.normalize_input': False})
+
+    if config['train.approx'] != False:
+        constraint.update({'train.verify_grad': ''})
 
     if config['net.init'] in ['inputs', 'targets']:
         assert config['data.values.num_samples'] >= config['net.hidden_size']

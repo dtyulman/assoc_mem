@@ -7,6 +7,8 @@ import torch, joblib
 from torch import nn
 # from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+mpl.use('Qt5agg') #prevents figs from stealing focus during training
 
 #for my machine only TODO: remove
 try:
@@ -20,13 +22,13 @@ import configs as cfg
 #%%
 train_config = cfg.Config({
     'class': 'FPTrain', #FPTrain, BPTrain
-    'batch_size': 4,
+    'batch_size': 128,
     #FPTrain only
-    'verify_grad': 'bptt', #num, bptt, num+bptt
+    'verify_grad': '', # '', 'num', 'bptt', 'num+bptt'
     'approx': False, #False, first, first-heuristic, inv-heuristic
 
     'optim': {'class': 'Adam', #CustomOpt, Adam
-              'lr': .05,
+              'lr': .005,
               #Adam only
               'weight_decay': 1e-9,
               'amsgrad': False,
@@ -43,7 +45,7 @@ train_config = cfg.Config({
     'loss_mode': 'full', #full, class
     'loss_fn': 'mse', #mse, cos, bce
     'acc_mode': 'full', #full, class
-    'acc_fn' : 'L0', #cls, L0, L1/mae
+    'acc_fn' : 'L1', #cls, L0, L1/mae
     'reg_fn': None, #L2, None
     'reg_rate': None,
 
@@ -56,28 +58,28 @@ train_config = cfg.Config({
 net_config = cfg.Config({
     'class': 'LargeAssociativeMem',
     'input_size': None, #if None, infer from dataset
-    'hidden_size': 2,
+    'hidden_size': 25,
     'init': 'random', #random, data_mean, inputs, targets
-    'normalize_weight': False,
+    'normalize_weight': True,
     'f': networks.Softmax(beta=0.1, train=True),
     'g': networks.Spherical(),
-    'normalize_input': True, #normalizes post-perturbation (data.normalize does it before, g=Spherical does it at every step)
+    'normalize_input': False, #normalizes post-perturbation but before showing it to network (data.normalize does it before, g=Spherical does it at every step)
     'input_mode': 'clamp', #init, cont, init+cont, clamp
-    'tau': 1,
-    'dt': .1,
-    'num_steps': 1000,
+    'tau': 1.,
+    'dt': 0.1,
+    'num_steps': 5000,
     'check_converged': True,
     'fp_mode': 'iter', #iter, del2
-    'fp_thres': 0., #must be small or torch.allclose(FP_grad, BP_grad) fails
+    'fp_thres': 1e-6, #must be small or torch.allclose(FP_grad, BP_grad) fails
     'dropout': False, #float in (0,1), or False
     })
 
 
 data_values_config = cfg.Config({
     'class': 'MNISTDataset', #MNISTDataset, RandomDataset
-    'include_test': True,
+    'include_test': False,
     'normalize' : 'data', #data, data+targets, False
-    'num_samples': 4, #if None takes entire MNISTDataset, requires int for RandomDataset
+    'num_samples': 25, #if None takes entire MNISTDataset, requires int for RandomDataset
     'balanced': False, #only for MNISTDataset or RandomDataset+'bern'
 
     #MNISTDataset only
@@ -94,7 +96,7 @@ data_values_config = cfg.Config({
 data_mode_config = cfg.Config({
     'classify': False,
     'perturb_entries': 0.5,
-    'perturb_mode': 'last', #rand, first, last (note: rand mask same for whole batch)
+    'perturb_mode': 'rand', #rand, first, last (note: rand mask same for whole batch)
     'perturb_value': 'min', #min, max, rand, <float>
     })
 
@@ -112,23 +114,23 @@ deltaconfigs = {}
 mode = 'combinatorial'
 
 #%%
-#small net small data
+#mem
 # baseconfig['net.hidden_size'] = 25
 # baseconfig['train.batch_size'] = 25
-# baseconfig['train.epochs'] = 2
+# baseconfig['train.epochs'] = 5000
 # baseconfig['train.print_every'] = 10
 # baseconfig['data.values.num_samples'] = 25
 # baseconfig['data.values.include_test'] = False
 
-#small net big data
-# baseconfig['net.hidden_size'] = 25
-# baseconfig['train.batch_size'] = 128
-# baseconfig['train.epochs'] = 100
-# baseconfig['train.print_every'] = 100
-# baseconfig['data.values.num_samples'] = None
-# baseconfig['data.values.include_test'] = True
+#small
+baseconfig['net.hidden_size'] = 25
+baseconfig['train.batch_size'] = 128
+baseconfig['train.epochs'] = 100
+baseconfig['train.print_every'] = 100
+baseconfig['data.values.num_samples'] = None
+baseconfig['data.values.include_test'] = True
 
-#big net big data
+#big
 # baseconfig['net.hidden_size'] = 500
 # baseconfig['train.batch_size'] = 64
 # baseconfig['train.epochs'] = 25
@@ -137,18 +139,19 @@ mode = 'combinatorial'
 # baseconfig['data.values.include_test'] = True
 
 
-# deltas = [#train, approx,            beta_init,   train_beta
-#     # ['FPTrain',  True,  networks.Softmax(beta=1,    train=True)],  #FP_heuristic
-#     # ['FPTrain',  False, networks.Softmax(beta=1,    train=True)],  #FP_exact
-#     # ['BPTrain', False, networks.Softmax(beta=1,    train=True)],  #SGD
-#     # ['FPTrain',  True,  networks.Argmax()], #FP_inf
-# ]
+deltas = [# train      approx             nonlin
+           ['FPTrain',  'first',           networks.Softmax(beta=.1,train=True)],
+           ['FPTrain',  'first-heuristic', networks.Softmax(beta=.1, train=True)],
+           ['FPTrain',  False,             networks.Softmax(beta=.1, train=True)],
+           ['BPTrain',  None,              networks.Softmax(beta=.1, train=True)],
+]
 
-# deltaconfigs = {'train.class': [delta[0] for delta in deltas],
-#                 'train.approx': [delta[1] for delta in deltas],
-#                 'net.f': [delta[2] for delta in deltas]
-#                 }
-# mode = 'sequential'
+deltaconfigs = {'train.class': [delta[0] for delta in deltas],
+                'train.approx': [delta[1] for delta in deltas],
+                'net.f': [delta[2] for delta in deltas],
+                'net.normalize_weight': [delta[3] for delta in deltas]
+                }
+mode = 'sequential'
 
 #%%
 configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs, mode=mode)
@@ -258,7 +261,7 @@ for config, label in zip(configs, labels):
 # plots.plot_loss_acc(logger)
 
 # #%%
-# plots.plot_weights(net, drop_last=10)
+# plots.plot_weights(net, drop_last=0)
 
 # #%%
 # n_per_class = 10
@@ -273,28 +276,28 @@ for config, label in zip(configs, labels):
 # debug_input, debug_target, debug_perturb_mask = data.get_aa_debug_batch(train_data, n_per_class=n_per_class)
 
 # num_steps = net.num_steps
-# fp_thres = net.fp_thres
-# check_converged = net.check_converged
-# net.num_steps = 1e10#int(100/net.dt)
-# net.fp_thres = 1e-9
-# net.check_converged = True
+# # fp_thres = net.fp_thres
+# # check_converged = net.check_converged
+# # net.num_steps = 1e10#int(100/net.dt)
+# # net.fp_thres = 1e-9
+# # net.check_converged = True
 
 # state_debug_history = net((debug_input, ~debug_perturb_mask), debug=True)
 
-# net.num_steps = num_steps
-# net.fp_thres = fp_thres
-# net.check_converged = check_converged
+# # net.num_steps = num_steps
+# # net.fp_thres = fp_thres
+# # net.check_converged = check_converged
 
 # fig, ax = plt.subplots(2,2, sharex=True)
 # ax = ax.flatten()
 
 # plots.plot_state_update_magnitude_dynamics(state_debug_history, n_per_class, num_steps, ax=ax[0])
-# # plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps, ax=ax[1])
+# plots.plot_energy_dynamics(state_debug_history, net, num_steps_train=num_steps, ax=ax[1])
 # plots.plot_hidden_dynamics(state_debug_history, transformation='max', num_steps_train=num_steps, ax=ax[2])
 # plots.plot_hidden_dynamics(state_debug_history, apply_nonlin=False, transformation='mean', ax=ax[3])
 
 # [a.set_xlabel('') for a in ax[0:2]]
-# # [a.legend_.remove() for a in ax[0:-1]]
+# [a.legend_.remove() for a in ax[0:-1]]
 # plots.scale_fig(fig, 1.5, 1.5)
 # fig.tight_layout()
 

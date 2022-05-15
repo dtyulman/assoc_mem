@@ -62,8 +62,8 @@ class Hardmax(Nonlinearity):
     """
     def _function(self, x):
         argmax = torch.argmax(x, dim=-2)
-        onehot = F.one_hot(argmax, num_classes=x.shape[-2]).transpose(-2,-1)
-        return onehot.float()
+        onehot = F.one_hot(argmax, num_classes=x.shape[-2]).transpose(-2,-1).to(torch.get_default_dtype())
+        return onehot
 
 
     def J(self, x):
@@ -95,19 +95,19 @@ class Softmax_1(Hardmax):
             f0 = self._zeroth_order(x) #zeroth order correction
         if eps is None:
             eps = self._eps(x) #perturbative variable
-        return (1-eps.sum())*f0 + eps #f = f0 + (I-E)*eps
+        return (1-eps.sum(dim=-2, keepdim=True))*f0 + eps #f1 = f0 + (I-E)*eps
 
     def _eps(self, x):
-        return torch.exp(self.beta*(x - x.max(dim=1, keepdim=True)[0]))
+        return torch.exp(self.beta*(x - x.max(dim=-2, keepdim=True)[0]))
 
     def _zeroth_order(self, x):
-        return super(x)
+        return super()._function(x)
 
     def _FF(self, f0, eps):
         FF = eps.squeeze(-1).diag_embed()
         FF -= eps @ f0.transpose(-2,-1)
-        FF -= eps.transpose(-2,-1) @ f0
-        FF += eps.sum() * f0 @ f0.transpose(-2,-1)
+        FF -= f0 @ eps.transpose(-2,-1)
+        FF += eps.sum(dim=-2, keepdim=True) * f0 @ f0.transpose(-2,-1)
         return FF
 
     def J(self, x, f0=None, eps=None):
@@ -115,7 +115,7 @@ class Softmax_1(Hardmax):
             f0 = self._zeroth_order(x)
         if eps is None:
             eps = self._eps(x)
-        return self.beta*self._FF(x, f0, eps)
+        return self.beta*self._FF(f0, eps)
 
     def D_beta(self, x, f0=None, eps=None, FF=None):
         if f0 is None:
@@ -123,7 +123,7 @@ class Softmax_1(Hardmax):
         if eps is None:
             eps = self._eps(x)
         if FF is None:
-            FF = self._FF(x, f0, eps)
+            FF = self._FF(f0, eps)
         return FF @ x
 
 
@@ -296,7 +296,7 @@ class LargeAssociativeMem(nn.Module):
     def _maybe_normalize_weight(self):
         if self.normalize_weight:
             #W is normalized, _W is raw; computation is done with W, learning is done on _W
-            self.W = self._W / self._W.norm(dim=1, keepdim=True)
+            self.W = self._W / self._W.norm(dim=1, keepdim=True) #[N,M]
         else:
             self.W = self._W
 
@@ -308,7 +308,7 @@ class LargeAssociativeMem(nn.Module):
             input, clamp_mask = input
 
         if self.normalize_input:
-            input /= input.norm(dim=1, keepdim=True)
+            input /= input.norm(dim=-2, keepdim=True)
 
         v = torch.randn_like(input)/100
         external_current = torch.zeros_like(input)
@@ -417,3 +417,27 @@ class LargeAssociativeMem(nn.Module):
         fWg = (f.transpose(-2,-1) @ self.W @ g).squeeze(-2)
         E = (vg - Lv) + (hf - Lh) - fWg
         return E
+
+
+# class Convolutional(nn.Module):
+#     """Krotov 2021, sec 4.3"""
+#     def __init__(self):
+#         super().__init__()
+
+#         self.fp_thres = fp_thres
+#         self.max_num_steps = max_num_steps
+
+#     def forward(self, X):
+#         """X is [B,L,L,Cin]"""
+
+#         for t in range(self.max_num_steps):
+#             X_prev = X
+#             X = self.step(X_prev) #[B,M,1]
+
+#             update_magnitude = (X_prev-X).norm()
+#             if update_magnitude < self.fp_thres:
+#                 break
+
+#     def step(self, X):
+#         Y = conv(X)
+#         Z = linear(Y)

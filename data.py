@@ -24,7 +24,7 @@ class ClassifyDatasetBase(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def _normalize(self, mode):
+    def _normalize_init(self, mode):
         if mode == 'data': #normalize each sample to unit vector
             self.data = self.data/self.data.norm(dim=1, keepdim=True)
         elif mode == 'data+targets':
@@ -66,7 +66,7 @@ class RandomDataset(ClassifyDatasetBase):
         if kwargs:
             warnings.warn(f'Ignoring unused RandomDataset kwargs: {kwargs}')
 
-        self._normalize(normalize)
+        self._normalize_init(normalize)
 
 
 
@@ -101,7 +101,7 @@ class MNISTDataset(ClassifyDatasetBase):
             self.data = self.data[:, ::downsample, ::downsample]
         num_samples, vpix, hpix = self.data.shape
         self.data = self.data.reshape(num_samples, vpix*hpix, 1) #flatten
-        self._normalize(normalize) #maybe normalize
+        self._normalize_init(normalize) #maybe normalize
 
         self.input_size = self.data.shape[1]
 
@@ -226,7 +226,6 @@ def get_aa_data(data_kwargs, aa_kwargs):
 
 def get_aa_debug_batch(train_data, select_classes='all', n_per_class=None):
     debug_data = deepcopy(train_data) #train_data is an AssociativeDataset object
-    print('copied')
     debug_data.dataset = filter_classes(debug_data.dataset, select_classes=select_classes,
                                         n_per_class=n_per_class)
     return next(iter(torch.utils.data.DataLoader(debug_data, batch_size=len(debug_data))))

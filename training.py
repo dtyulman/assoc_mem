@@ -380,7 +380,7 @@ class FPTrain(AssociativeTrain):
         h = self.net.compute_hidden(g)
         if self.approx == 'first': #assumes f(h) = softmax(beta*h)
             f_first_order = networks.Softmax_1()
-            f = f_first_order._zeroth_order(h)
+            f = f_first_order._zeroth_order(h) #not really f, but plays its role when calculating dLdW
             Jf = f_first_order.J(h, f0=f)
             D_beta = f_first_order.D_beta(h)
         else:
@@ -404,7 +404,7 @@ class FPTrain(AssociativeTrain):
         del Jg
 
         if 'clamp' in self.net.input_mode:
-            dLdW = torch.zeros(B, *self.net.W.shape)
+            dLdW = torch.zeros(B, *self.net.W.shape, device=a.device)
             dLdW[:,:,unclamped_mask] = f @ a.transpose(-2,-1)
         else:
             dLdW = f @ a.transpose(-2,-1)

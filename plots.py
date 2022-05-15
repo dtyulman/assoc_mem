@@ -52,7 +52,10 @@ def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(im, cax=cax)
 
-    ax.axis('off')
+
+    [ax.spines[spine].set_visible(False) for spine in ['top', 'bottom', 'left', 'right']]
+    ax.set_xticks([])
+    ax.set_yticks([])
     ax.set_title(title)
 
 
