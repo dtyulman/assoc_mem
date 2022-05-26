@@ -92,7 +92,7 @@ class MNISTDataset(ClassifyDatasetBase):
         self.target_size = self.targets.shape[1]
 
         #apply data transformations
-        self.data = self.data/(self.data.max()-self.data.min()) #to range [0., 1.]
+        self.data = (self.data-self.data.min())/(self.data.max()-self.data.min()) #to range [0., 1.]
         if balanced: #put data in range [+1,-1] instead of [0,1]
             self.data = 2*self.data-1
         if crop: #remove `crop` pixels from top,bottom,left,right
@@ -104,6 +104,33 @@ class MNISTDataset(ClassifyDatasetBase):
         self._normalize_init(normalize) #maybe normalize
 
         self.input_size = self.data.shape[1]
+
+
+class CIFAR10Dataset(ClassifyDatasetBase):
+    def __init__(self, num_samples=None, test=False, **kwargs):
+        if kwargs:
+            warnings.warn(f'Ignoring unused CIFAR10Dataset kwargs: {kwargs}')
+
+        #get data
+        cifar = torchvision.datasets.CIFAR10(root='./data/CIFAR10', download=True, train=(not test))
+        self.targets = torch.tensor(cifar.targets)
+        self.data = torch.tensor(cifar.data) #in range [0, 255]
+
+        #get subset
+        if num_samples is not None:
+            self.data = self.data[:num_samples]
+            self.targets = self.targets[:num_samples]
+
+        #apply target transformations
+        self.num_classes = 10
+        self.targets = F.one_hot(self.targets, num_classes=self.num_classes).unsqueeze(-1)
+        self.target_size = self.targets.shape[1]
+
+        self.data = (self.data-self.data.min())/(self.data.max()-self.data.min()) #to range [0., 1.]
+        # self.data = self.data*2-1 #to range [-1., 1.]
+        self.data = self.data.transpose(-1,-2).transpose(-2,-3) #[D,N,N,C]->[D,N,C,N]->[D,C,N,N]
+
+        self.num_samples, self.channels, self.input_size, _ = self.data.shape
 
 
 
@@ -152,7 +179,6 @@ class AssociativeDataset(Dataset):
         assert self.perturb_num < self.input_size, \
             'Must have perturb_num ({self.perturb_num}) < input_size ({self.input_size})'
 
-
         assert perturb_mode in ['rand', 'first', 'last']
         self.perturb_mode = perturb_mode
 
@@ -165,14 +191,17 @@ class AssociativeDataset(Dataset):
             self.perturb_value = perturb_value
 
 
-    def _perturb(self, datapoint):
-        datapoint = deepcopy(datapoint) #prevent in-place modification
-
-        #perturb_mask indicates which entries will be perturbed
+    def _get_perturb_mask(self, datapoint):
         if self.perturb_mode == 'rand':
-            if len(datapoint.shape)==3: #[B,M,1]
+            if len(datapoint.shape)==4: #[B,C,L,L]
                 perturb_mask = torch.rand_like(datapoint[0]) < self.perturb_frac
-                perturb_mask = perturb_mask.tile(datapoint.shape[0], 1, 1)
+                perturb_mask = perturb_mask.tile(datapoint.shape[0], 1, 1, 1)
+            elif len(datapoint.shape)==3: #[B,M,1] or [C,L,L]
+                if datapoint.shape[-1] == 1:
+                    perturb_mask = torch.rand_like(datapoint[0]) < self.perturb_frac
+                    perturb_mask = perturb_mask.tile(datapoint.shape[0], 1, 1)
+                elif datapoint.shape[-1] == datapoint.shape[-2]:
+                    perturb_mask = torch.rand_like(datapoint) < self.perturb_frac
             elif len(datapoint.shape)==2: #[M,1]
                 perturb_mask = torch.rand_like(datapoint) < self.perturb_frac
 
@@ -181,15 +210,36 @@ class AssociativeDataset(Dataset):
             #inputs as perturbed targets instead of perturbing on-the-fly
             perturb_mask = torch.zeros_like(datapoint, dtype=bool)
             if self.perturb_mode == 'first':
-                if len(datapoint.shape)==3: #[B,M,1]
-                    perturb_mask[:,:self.perturb_num] = 1
+                if len(datapoint.shape)==4: #[B,C,L,L]
+                    raise NotImplementedError()
+                elif len(datapoint.shape)==3: #[B,M,1] or [C,L,L]
+                    if datapoint.shape[-1] == 1:
+                        perturb_mask[:,:self.perturb_num] = 1
+                    elif datapoint.shape[-1] == datapoint.shape[-2]:
+                        raise NotImplementedError()
                 elif len(datapoint.shape)==2: #[M,1]
                     perturb_mask[:self.perturb_num] = 1
+
             elif self.perturb_mode == 'last':
-                if len(datapoint.shape)==3: #[B,M,1]
-                    perturb_mask[:,-self.perturb_num:] = 1
+                if len(datapoint.shape)==4: #[B,C,L,L]
+                    raise NotImplementedError()
+                elif len(datapoint.shape)==3: #[B,M,1] or [C,L,L]
+                    if datapoint.shape[-1] == 1:
+                        perturb_mask[:,-self.perturb_num:] = 1
+                    elif datapoint.shape[-1] == datapoint.shape[-2]:
+                        raise NotImplementedError()
                 elif len(datapoint.shape)==2: #[M,1]
                     perturb_mask[-self.perturb_num:] = 1
+
+        return perturb_mask
+
+
+
+    def _perturb(self, datapoint):
+        datapoint = deepcopy(datapoint) #prevent in-place modification
+
+        #perturb_mask indicates which entries will be perturbed
+        perturb_mask = self._get_perturb_mask(datapoint)
 
         #perturb_value indicates what the perturbed entries will be set to
         if self.perturb_value == 'rand':

@@ -192,13 +192,13 @@ class AssociativeTrain():
                     self.logger(f'params/{param_name}_std', param_value.std())
 
             #log plots/images more sparsely to save space
-            if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
-                ax = plots.plot_weights(self.net)
-                try:
-                    fig = ax[0].get_figure()
-                except:
-                    fig = ax.get_figure()
-                self.logger.add_figure('weights', fig)
+            # if self.logger.iteration % (self.sparse_log_factor*self.print_every) == 0:
+            #     ax = plots.plot_weights(self.net)
+            #     try:
+            #         fig = ax[0].get_figure()
+            #     except:
+            #         fig = ax.get_figure()
+            #     self.logger.add_figure('weights', fig)
 
                 # #note, this grabs the first 10 of each class, not the first 100 samples, so if
                 # #initializing weights with data, it's not guaranteed that the first 100 hidden units

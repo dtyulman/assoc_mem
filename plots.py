@@ -3,10 +3,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from cycler import cycler #for making custom color cycles
 import numpy as np
 import torch
-
-MNIST_VPIX = 28
-MNIST_HPIX = 28
-MNIST_CLASSES = 10
+import torchvision
+import math
 
 
 def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
@@ -34,13 +32,26 @@ def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
                cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
     fig, ax = prep_axes(ax)
     mat = mat.squeeze(dim=-1)
-    try:
-        mat = mat.cpu().detach().numpy()
-    except:
-        pass
 
-    imgs = rows_to_images(mat, drop_last=drop_last, pad_nan=pad_nan)
-    grid = images_to_grid(imgs, vpad=1, hpad=1)
+    if len(mat.shape) == 2: #[B,M] for data batch or [N,M] for a weight matrix
+        try:
+            mat = mat.cpu().detach().numpy()
+        except:
+            pass
+        imgs = rows_to_images(mat, drop_last=drop_last, pad_nan=pad_nan)
+        grid = images_to_grid(imgs, vpad=1, hpad=1)
+    elif len(mat.shape) == 4: #[B,C,L,L] for image data batch
+        assert drop_last==0
+        cbar=False
+        rows,_ = length_to_rows_cols(len(mat))
+        grid = torchvision.utils.make_grid(mat, rows, normalize=True, padding=1,
+                                           pad_value=torch.tensor(float('nan')))
+        try:
+            grid = grid.cpu().detach().numpy()
+        except:
+            pass
+        grid = np.transpose(grid, (1,2,0))
+
 
     if vmin is None and vmax is None and cmap == 'RdBu_r':
         vmax = np.nanmax(np.abs(grid))
@@ -59,32 +70,44 @@ def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
     ax.set_title(title)
 
 
-def plot_data_batch(inputs, targets, ax=None):
-    fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
-    vmin = min(inputs.min(), targets.min())
-    vmax = min(inputs.max(), targets.max())
-    _plot_rows(inputs, ax=axs[0], title='Inputs', cmap=None, vmin=vmin, vmax=vmax, cbar=False)
-    _plot_rows(targets, ax=axs[1], title='Targets', cmap=None, vmin=vmin, vmax=vmax)
-    scale_fig(fig, 1.5)
+def plot_data_batch(inputs, targets, outputs=None, ax=None):
+    if outputs is None:
+        fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
+        v = max(inputs.abs().max(), targets.abs().max())
+        _plot_rows(inputs,  ax=axs[0], title='Inputs',  cmap='RdBu_r', vmin=-v, vmax=v)
+        _plot_rows(targets, ax=axs[1], title='Targets', cmap='RdBu_r', vmin=-v, vmax=v)
+        scale_fig(fig, 1.5)
+    else:
+        fig, axs = prep_axes(ax,1,3, sharex=True, sharey=True)
+        v = max(inputs.abs().max(), targets.abs().max(), outputs.abs().max())
+        _plot_rows(inputs,  ax=axs[0], title='Inputs',  cmap='RdBu_r', vmin=-v, vmax=v)
+        _plot_rows(targets, ax=axs[1], title='Targets', cmap='RdBu_r', vmin=-v, vmax=v)
+        _plot_rows(outputs, ax=axs[2], title='Outputs', cmap='RdBu_r', vmin=-v, vmax=v)
+        scale_fig(fig, 2)
     fig.tight_layout()
     return axs
 
 
-def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0):
-    hidden_size, input_size = net.W.shape #[N,M]
-    inputs = torch.rand(num_fps, input_size, 1)
+def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0, ax=None):
+    if inputs is None:
+        hidden_size, input_size = net.W.shape #[N,M]
+        inputs = torch.rand(num_fps, input_size, 1)
 
-    num_steps = net.num_steps
+    num_steps = net.max_num_steps
     fp_thres = net.fp_thres
+    input_mode = net.input_mode
+
     net.num_steps = 10000
     net.fp_thres = 1e-10
+    net.input_mode = 'init'
 
     outputs = net(inputs)
 
-    net.num_steps = num_steps
+    net.max_num_steps = num_steps
     net.fp_thres = fp_thres
+    net.input_mode = input_mode
 
-    return _plot_rows(outputs, drop_last=drop_last, title='Fixed points')
+    return _plot_rows(outputs, drop_last=drop_last, title='Fixed points', ax=ax)
 
 
 
@@ -124,7 +147,7 @@ def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=T
     ax[0].set_ylabel('Most active unit')
 
     ax[1].plot(max_h_value, ls='', marker='.')
-    ax[1].set_ylabel(f'Activity $({key})$')
+    ax[1].set_ylabel(f'Activity of max unit $({key})$')
     if n_per_class is None:
         ax[1].set_xlabel('Sample')
     else:
@@ -189,6 +212,8 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
         title = 'State (v)'
 
     T,B,M = state_trajectory.shape
+    hpix = vpix = int(math.sqrt(M))
+
     num_steps_plotted = min(num_steps_plotted, T)
     steps = np.linspace(0, T-1, num_steps_plotted, dtype=int)
     state_trajectory = state_trajectory[steps] #[T,B,M]->[num_steps_plotted,B,M]
@@ -196,8 +221,8 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
     state_trajectory_images = []
     for b in range(B):
         individual_state_trajectory = state_trajectory[:,b] #[num_steps_plotted,M]
-        state_trajectory_images += rows_to_images(individual_state_trajectory, #vpix=MNIST_VPIX,
-                                                  hpix=MNIST_HPIX)#, drop_last=MNIST_CLASSES)
+        state_trajectory_images += rows_to_images(individual_state_trajectory, #vpix=vpix,
+                                                  hpix=hpix)#, drop_last=MNIST_CLASSES)
     state_trajectory_images = images_to_grid(state_trajectory_images,
                                              rows=B, cols=num_steps_plotted, vpad=1)
 
@@ -207,12 +232,12 @@ def plot_state_dynamics(state_debug_history, num_steps_plotted=20, targets=None,
     cax = divider.append_axes('right', size='2%', pad=0.05)
     fig.colorbar(im, cax=cax)
 
-    xticks = np.arange(MNIST_HPIX//2, MNIST_HPIX*num_steps_plotted+MNIST_HPIX//2, MNIST_HPIX)
+    xticks = np.arange(hpix//2, hpix*num_steps_plotted+hpix//2, hpix)
     ax.set_xticks(xticks)
     ax.set_xticklabels(steps)
     ax.set_xlabel('Time steps')
 
-    yticks = np.arange(MNIST_VPIX//2, MNIST_VPIX*B+MNIST_VPIX//2, MNIST_VPIX)
+    yticks = np.arange(vpix//2, vpix*B+vpix//2, vpix)
     ax.set_yticks(yticks)
     ax.set_yticklabels([])
     ax.set_ylabel('Input')

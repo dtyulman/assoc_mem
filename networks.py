@@ -1,4 +1,4 @@
-import warnings
+import warnings, math
 from itertools import chain, combinations
 
 import torch
@@ -241,11 +241,11 @@ class LargeAssociativeMem(nn.Module):
     """
     def __init__(self, input_size, hidden_size, f=Softmax(beta=1, train=False), g=Identity(), tau=1.,
                  normalize_weight=False, dropout=False, normalize_input=False, input_mode='init',
-                 num_steps=float('inf'), dt=0.1, check_converged=True, fp_thres=0.001, fp_mode='iter',
+                 max_num_steps=float('inf'), dt=0.1, check_converged=True, fp_thres=0.001, fp_mode='iter',
                  **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
-            warnings.warn(f'Ignoring unused ModernHopfield kwargs: {kwargs}')
+            warnings.warn(f'Ignoring unused LargeAssociativeMem kwargs: {kwargs}')
         self._check_parameters(normalize_weight, dropout, normalize_input, input_mode, dt, fp_mode)
 
         super().__init__()
@@ -264,7 +264,7 @@ class LargeAssociativeMem(nn.Module):
 
         self.tau = torch.tensor(float(tau))
         self.dt = float(dt)
-        self.num_steps = num_steps
+        self.max_num_steps = max_num_steps
         self.check_converged = check_converged
         self.fp_thres = float(fp_thres)
         self.fp_mode = fp_mode
@@ -348,7 +348,7 @@ class LargeAssociativeMem(nn.Module):
             full_state_history = []
         update_magnitude = float('inf')
         current_step = 0
-        while update_magnitude > self.fp_thres and current_step < self.num_steps:
+        while update_magnitude > self.fp_thres and current_step < self.max_num_steps:
             v_prev = v
             v = self.step(v_prev, external_current, clamp_mask, clamp_values, debug=debug) #[B,M,1]
             current_step += 1
@@ -359,7 +359,7 @@ class LargeAssociativeMem(nn.Module):
 
             with torch.no_grad():
                 update_magnitude = (v_prev-v).norm()
-                if self.check_converged and current_step >= self.num_steps and update_magnitude > self.fp_thres:
+                if self.check_converged and current_step >= self.max_num_steps and update_magnitude > self.fp_thres:
                     warnings.warn('Not converged: '
                           f'(update={update_magnitude}, fp_thres={self.fp_thres})')
 
@@ -419,25 +419,85 @@ class LargeAssociativeMem(nn.Module):
         return E
 
 
-# class Convolutional(nn.Module):
-#     """Krotov 2021, sec 4.3"""
-#     def __init__(self):
-#         super().__init__()
 
-#         self.fp_thres = fp_thres
-#         self.max_num_steps = max_num_steps
+class ConvolutionalMem(nn.Module):
+    """Krotov 2021, sec 4.3"""
+    def __init__(self, x_size, x_channels, y_channels=5, kernel_size=10, stride=1, z_size=50,
+                 dt=0.1, fp_thres=1e-6, max_num_steps=5000, **kwargs):
+        if kwargs:
+            #kwargs ignores any extra values passed in (eg. via a Config object)
+            warnings.warn(f'Ignoring unused ConvolutionalMem kwargs: {kwargs}')
+        super().__init__()
 
-#     def forward(self, X):
-#         """X is [B,L,L,Cin]"""
+        self.fp_thres = fp_thres
+        self.max_num_steps = max_num_steps
+        self.input_mode = 'init'
 
-#         for t in range(self.max_num_steps):
-#             X_prev = X
-#             X = self.step(X_prev) #[B,M,1]
+        self.x_channels = x_channels #Cx
+        self.y_channels = y_channels #Cy
+        self.kernel_size = kernel_size #K
+        self.stride = stride #S
+        self.x_size = x_size #L
+        self.y_size = math.floor((x_size-kernel_size)/stride)+1 #M=floor((L-K)/S)+1
+        self.z_size = z_size #N
 
-#             update_magnitude = (X_prev-X).norm()
-#             if update_magnitude < self.fp_thres:
-#                 break
+        self.conv = nn.Conv2d(self.x_channels, self.y_channels,
+                              self.kernel_size, self.stride, bias=False)
+        self.convT = nn.ConvTranspose2d(self.y_channels, self.x_channels,
+                                         self.kernel_size, self.stride, bias=False)
+        self.convT.weight = self.conv.weight
 
-#     def step(self, X):
-#         Y = conv(X)
-#         Z = linear(Y)
+        self.W = nn.Parameter(torch.empty(self.z_size, self.y_channels*self.y_size**2)) #[N,CyMM]
+        nn.init.xavier_normal_(self.W)
+
+        self.dt = dt
+        self.tau_x = 1.
+        self.tau_y = 0.2
+
+        self.nonlin_y = nn.Softmax(dim=1) #y is [B,Cy,M,M]
+        self.nonlin_z = nn.Softmax(dim=-2) #z is [B,N,1]
+        self.beta_y = 3.
+        self.beta_z = 7.
+
+
+
+    def fc(self, fy):
+        """fy is post-nonlinearity, shape=[B,M,M,Cy]"""
+        return self.W @ fy.reshape(fy.shape[0],-1,1) #[N,CyMM]@[B,CyMM,1]->[B,N,1]
+
+
+    def fcT(self, fz):
+        """fz is post-nonlinearity, shape=[B,N,1]"""
+        out = self.W.t() @ fz #[CyMM,N]@[B,N,1]->[B,CyMM,1]
+        return out.reshape(fz.shape[0], self.y_channels, self.y_size, self.y_size) #[B,Cy,M,M]
+
+
+    def forward(self, input, debug=False):
+        x,_ = input
+        y = torch.zeros(x.shape[0], self.y_channels, self.y_size, self.y_size, device=x.device)
+        for t in range(self.max_num_steps):
+            x_prev, y_prev = x, y
+            x,y = self.step(x_prev, y_prev) #[B,Cx,L,L], [B,Cy,M,M]
+            # with torch.no_grad():
+            #     update_magnitude = (x_prev-x).norm()
+            #     if update_magnitude < self.fp_thres:
+            #         break
+        # if t >= self.max_num_steps-1:
+        #     warnings.warn('Not converged: '
+        #               f'(update={update_magnitude}, fp_thres={self.fp_thres})')
+        with torch.no_grad():
+            update_magnitude = (x_prev-x).norm()
+        print(f'steps={t}, final_update={update_magnitude}')
+        return x
+
+
+    def step(self, x, y):
+
+        z = self.fc( self.nonlin_y(self.beta_y*y) ) #[B,N,1]
+
+        y_instant = self.conv(x) + self.fcT( self.nonlin_z(self.beta_z*z) )
+        y = y + (self.dt/self.tau_y)*(-y + y_instant)  #[B,Cy,M,M]
+
+        x_instant = self.convT(self.nonlin_y(y)) #[B,Cx,L,L]
+        x = x + (self.dt/self.tau_x)*(-x + x_instant)
+        return x, y
