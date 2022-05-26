@@ -12,7 +12,7 @@ import matplotlib as mpl
 #for my machine only TODO: remove
 try:
     os.chdir('/Users/danil/My/School/Columbia/Research/assoc_mem')
-except (FileNotFoundError, ImportError) as e:
+except (FileNotFoundError) as e:
     print(e.args)
 
 #custom
