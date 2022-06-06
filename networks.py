@@ -451,14 +451,13 @@ class ConvolutionalMem(nn.Module):
         nn.init.xavier_normal_(self.W)
 
         self.dt = dt
-        self.tau_x = 1.
+        self.tau_x = 2.
         self.tau_y = 0.2
 
         self.nonlin_y = nn.Softmax(dim=1) #y is [B,Cy,M,M]
         self.nonlin_z = nn.Softmax(dim=-2) #z is [B,N,1]
-        self.beta_y = 3.
-        self.beta_z = 7.
-
+        self.beta_y = nn.Parameter(torch.tensor(15.), requires_grad=False)
+        self.beta_z = nn.Parameter(torch.tensor(15.), requires_grad=False)
 
 
     def fc(self, fy):
@@ -491,13 +490,12 @@ class ConvolutionalMem(nn.Module):
         return x
 
 
-    def step(self, x, y):
+    def step(self, x_prev, y_prev):
+        z = self.fc( self.nonlin_y(self.beta_y*y_prev) ) #[B,N,1]
 
-        z = self.fc( self.nonlin_y(self.beta_y*y) ) #[B,N,1]
+        y_instant = self.conv(x_prev) + self.fcT( self.nonlin_z(self.beta_z*z) )
+        y = y_prev + (self.dt/self.tau_y)*(-y_prev + y_instant)  #[B,Cy,M,M]
 
-        y_instant = self.conv(x) + self.fcT( self.nonlin_z(self.beta_z*z) )
-        y = y + (self.dt/self.tau_y)*(-y + y_instant)  #[B,Cy,M,M]
-
-        x_instant = self.convT(self.nonlin_y(y)) #[B,Cx,L,L]
-        x = x + (self.dt/self.tau_x)*(-x + x_instant)
+        x_instant = self.convT(self.nonlin_y(y_prev)) #[B,Cx,L,L]
+        x = x_prev + (self.dt/self.tau_x)*(-x_prev + x_instant)
         return x, y

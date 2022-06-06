@@ -218,7 +218,7 @@ class BPTrain(AssociativeTrain):
     def __init__(self, net, train_loader, test_loader=None, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
-        self.name = 'SGD'
+        self.name = 'BPTT'
 
 
     def _update_parameters(self, output, target, input=None):
