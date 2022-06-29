@@ -241,8 +241,8 @@ class LargeAssociativeMem(nn.Module):
     """
     def __init__(self, input_size, hidden_size, f=Softmax(beta=1, train=False), g=Identity(), tau=1.,
                  normalize_weight=False, dropout=False, normalize_input=False, input_mode='init',
-                 max_num_steps=float('inf'), dt=0.1, check_converged=True, fp_thres=0.001, fp_mode='iter',
-                 **kwargs):
+                 step_mode='v', max_num_steps=float('inf'), dt=0.1, check_converged=True, fp_thres=0.001,
+                 fp_mode='iter', **kwargs):
         if kwargs:
             #kwargs ignores any extra values passed in (eg. via a Config object)
             warnings.warn(f'Ignoring unused LargeAssociativeMem kwargs: {kwargs}')
@@ -261,6 +261,8 @@ class LargeAssociativeMem(nn.Module):
         self._maybe_normalize_weight()
 
         self.dropout = dropout #only applies if net in in 'training' mode
+
+        self.step_mode = step_mode
 
         self.tau = torch.tensor(float(tau))
         self.dt = float(dt)
@@ -367,10 +369,20 @@ class LargeAssociativeMem(nn.Module):
             return full_state_history
 
         self.v_last = v
-        return self.g(v)
+        if self.step_mode == 'g':
+            return v #v is actually g(v) from step_g()
+        elif self.step_mode == 'v':
+            return self.g(v)
 
 
-    def step(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
+    def step(self, g_or_v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
+        if self.step_mode == 'g':
+            return self.step_g(g_or_v, I, clamp_mask, clamp_values, debug)
+        elif self.step_mode == 'v':
+            return self.step_v(g_or_v, I, clamp_mask, clamp_values, debug)
+
+
+    def step_v(self, v, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
         """ v(t+dt) = v(t) + dt/tau_v [ -v(t) + W*f(h) ]
 
         Discretized version of continuous dynamics with tau_h --> 0 (i.e. h = Wg)
@@ -392,6 +404,32 @@ class LargeAssociativeMem(nn.Module):
                 full_state[key] = locals()[key].detach()
             return full_state
         return v_next
+
+
+    def step_g(self, g, I=torch.tensor(0.), clamp_mask=None, clamp_values=None, debug=False):
+        """ v(t+dt) = v(t) + dt/tau_v [ -v(t) + W*f(h) ]
+
+        Discretized version of continuous dynamics with tau_h --> 0 (i.e. h = Wg)
+            tau_h*dh/dt = -h + W*g(v)
+            tau_v*dv/dt = -v + W^T*f(h) + I
+        """
+        h = self.compute_hidden(g)
+        f = self._maybe_dropout(self.f(h)) #[B,N,1]
+        g_instant = self.g(self.compute_feature(f, I))
+        # g_next = g + (self.dt/self.tau)*(-g + g_instant) #[B,M,1]
+        g_next = (1-self.dt/self.tau)*g + (self.dt/self.tau)*g_instant #[B,M,1]
+
+
+        if 'clamp' in self.input_mode: #overwrite any updates to clamped units
+            g_next[clamp_mask] = clamp_values
+
+        if debug:
+            full_state = {}
+            for key in ['v', 'I', 'h', 'f', 'v_instant', 'v_next']:
+                #TODO: should be storing v_next *before* update? (only matters for 'cont' input_mode)
+                full_state[key] = locals()[key].detach()
+            return full_state
+        return g_next
 
 
     def compute_hidden(self, g):
@@ -444,20 +482,24 @@ class ConvolutionalMem(nn.Module):
         self.conv = nn.Conv2d(self.x_channels, self.y_channels,
                               self.kernel_size, self.stride, bias=False)
         self.convT = nn.ConvTranspose2d(self.y_channels, self.x_channels,
-                                         self.kernel_size, self.stride, bias=False)
+                                        self.kernel_size, self.stride, bias=False)
         self.convT.weight = self.conv.weight
 
         self.W = nn.Parameter(torch.empty(self.z_size, self.y_channels*self.y_size**2)) #[N,CyMM]
         nn.init.xavier_normal_(self.W)
 
         self.dt = dt
-        self.tau_x = 2.
-        self.tau_y = 0.2
+        self.tau_x = 1.
+        self.tau_y = 0.1
+        self.eta_x = self.dt/self.tau_x
+        self.eta_y = self.dt/self.tau_y
 
-        self.nonlin_y = nn.Softmax(dim=1) #y is [B,Cy,M,M]
-        self.nonlin_z = nn.Softmax(dim=-2) #z is [B,N,1]
-        self.beta_y = nn.Parameter(torch.tensor(15.), requires_grad=False)
-        self.beta_z = nn.Parameter(torch.tensor(15.), requires_grad=False)
+
+        self.beta_y = nn.Parameter(torch.tensor(1.), requires_grad=False)
+        self.beta_z = nn.Parameter(torch.tensor(1.), requires_grad=False)
+        self.f = lambda y: torch.softmax(self.beta_y*y, dim=1) #y is [B,Cy,M,M]
+        self.g = lambda z: torch.softmax(self.beta_z*z, dim=-2) #z is [B,N,1]
+
 
 
     def fc(self, fy):
@@ -476,26 +518,179 @@ class ConvolutionalMem(nn.Module):
         y = torch.zeros(x.shape[0], self.y_channels, self.y_size, self.y_size, device=x.device)
         for t in range(self.max_num_steps):
             x_prev, y_prev = x, y
-            x,y = self.step(x_prev, y_prev) #[B,Cx,L,L], [B,Cy,M,M]
-            # with torch.no_grad():
-            #     update_magnitude = (x_prev-x).norm()
-            #     if update_magnitude < self.fp_thres:
-            #         break
+            x, y = self.step(x_prev, y_prev) #[B,Cx,L,L], [B,Cy,M,M]
+            with torch.no_grad():
+                update_magnitude = (x_prev-x).norm()
+        #         if update_magnitude < self.fp_thres:
+        #             break
         # if t >= self.max_num_steps-1:
         #     warnings.warn('Not converged: '
         #               f'(update={update_magnitude}, fp_thres={self.fp_thres})')
-        with torch.no_grad():
-            update_magnitude = (x_prev-x).norm()
-        print(f'steps={t}, final_update={update_magnitude}')
-        return x
+        print(f'steps={t+1}, final_update={update_magnitude}')
+        return x, y
 
+
+    # def step(self, x_prev, y_prev):
+    #     #x,y,z are *pre* activation (ie. input currents)
+    #     z = self.fc( self.f(y_prev) ) #[B,N,1]
+
+    #     y_instant = self.conv(x_prev) + self.fcT( self.g(z) )
+    #     y = y_prev + (self.dt/self.tau_y)*(-y_prev + y_instant)  #[B,Cy,M,M]
+
+    #     x_instant = self.convT(self.f(y_prev)) #[B,Cx,L,L]
+    #     x = x_prev + (self.dt/self.tau_x)*(-x_prev + x_instant)
+    #     return x, y
+
+
+        # f = self.f(self.W@g) #[B,N,1]
+        # g_instant = self.g(self.W.t()@f)
+        # g_next = g + (self.dt/self.tau)*(-g + g_instant) #[B,M,1]
 
     def step(self, x_prev, y_prev):
-        z = self.fc( self.nonlin_y(self.beta_y*y_prev) ) #[B,N,1]
+        #x,y,z are *post* activation (ie. firing rate)
+        g = self.g( self.fc(y_prev) ) #[B,N,1]
 
-        y_instant = self.conv(x_prev) + self.fcT( self.nonlin_z(self.beta_z*z) )
-        y = y_prev + (self.dt/self.tau_y)*(-y_prev + y_instant)  #[B,Cy,M,M]
+        y_instant = self.f( self.conv(x_prev) + self.fcT(g) ) #[B,Cy,M,M]
+        # x_instant = self.convT(y_prev) #[B,Cx,L,L] #THIS IS THE BUG
+        x_instant = self.convT(y_instant)
 
-        x_instant = self.convT(self.nonlin_y(y_prev)) #[B,Cx,L,L]
-        x = x_prev + (self.dt/self.tau_x)*(-x_prev + x_instant)
+
+        y = (1-self.eta_y)*y_prev + self.eta_y*y_instant
+        x = (1-self.eta_x)*x_prev + self.eta_x*x_instant
+
         return x, y
+
+
+class ConvMem(nn.Module):
+    def __init__(self,
+                 x_size,
+                 x_channels,
+                 y_channels,
+                 z_size,
+                 kernel_size,
+                 stride = 1,
+                 y_nonlin = lambda y: torch.softmax(y, dim=1),
+                 z_nonlin = lambda z: torch.softmax(z, dim=-2),
+                 tau_x = 1,
+                 tau_y = 0.1,
+                 dt = 0.1,
+                 converged_thres = 1e-10,
+                 max_steps = 5000):
+        super().__init__()
+        self.L = x_size
+        self.M = math.floor((x_size-kernel_size)/stride)+1
+        self.N = z_size
+        self.Cx = x_channels
+        self.Cy = y_channels
+        self.K = kernel_size
+        self.S = stride
+
+        self.f = y_nonlin
+        self.g = z_nonlin
+
+        self.conv = nn.Conv2d(self.Cx, self.Cy, self.K, self.S, bias=False)
+        self.convT = nn.ConvTranspose2d(self.Cx, self.Cy, self.K, self.S, bias=False)
+        self.convT.weight = self.conv.weight
+
+        self.W = nn.Parameter(torch.empty(self.N, self.Cy*self.M*self.M)) #[N, CyMM]
+        nn.init.kaiming_normal_(self.W)
+
+        self.dt = float(dt)
+        self.tau_x = float(tau_x)
+        self.tau_y = float(tau_y)
+        self.eta_x = self.dt/self.tau_x
+        self.eta_y = self.dt/self.tau_y
+        self.converged_thres = converged_thres
+        self.max_steps = int(max_steps)
+
+    def fc(self, f):
+        #f is [B,Cy,M,M]
+        z = self.W @ f.reshape(-1,self.Cy*self.M*self.M,1) #[N,CyMM]@[B,CyMM,1]->[B,N,1]
+        return z
+
+    def fcT(self, g):
+        y = self.W.t() @ g #[CyMM,N]@[B,N,1]->[B,CyMM,1]
+        return y.reshape(-1, self.Cy, self.M, self.M) #[B,Cy,M,M]
+
+
+    def forward(self, input):
+        state = (input[0], torch.zeros(input[0].shape[0],self.Cy,self.M,self.M)) #([B,Cx,L,L],[B,Cy,M,M])
+        for t in range(self.max_steps):
+            prev_state = state
+            state = self.step(*prev_state)
+            with torch.no_grad():
+                step_size = (state[0] - prev_state[0]).norm()
+                if step_size <= self.converged_thres:
+                    print(f'FP converged: t={t} step={step_size.item()}')
+                    break
+        if t >= self.max_steps-1:
+            print(f'FP not converged: t={t}, step={step_size}, thres={self.converged_thres}')
+        return state
+
+
+    def step(self, x_prev, f_prev):
+        g = self.g( self.fc(f_prev) )
+        f = self.f( self.fcT(g) + self.conv(x_prev) )
+        x = self.convT(f)
+
+        x = (1-self.eta_x)*x_prev + self.eta_x*x
+        f = (1-self.eta_y)*f_prev + self.eta_y*f
+
+        return x,f
+
+
+
+def to_tup(tensor_or_tensors):
+    if isinstance(tensor_or_tensors, torch.Tensor):
+        return (tensor_or_tensors,)
+    return tuple(tensor_or_tensors)
+
+def t2v(seq_of_tensors): #tuple to vector
+    return torch.cat([v.flatten() for v in seq_of_tensors])
+
+class FixedPointWrapper(nn.Module):
+    def __init__(self, net, tol=0):
+        super().__init__()
+        self.net = net
+        # self.grad_mode = grad_mode
+        self.tol = tol
+
+    def forward(self, *args, **kwargs):
+        with torch.no_grad():
+            fp = to_tup(self.net(*args, **kwargs))
+        fp = to_tup(self.net.step(*fp)) #re-engage autograd
+
+        #backward hook to update gradient
+        fp_in  = tuple(_fp.clone().detach().requires_grad_() for _fp in fp)
+        fp_out = to_tup(self.net.step(*fp_in))
+        def backward_hook(grad): #from https://implicit-layers-tutorial.org/deep_equilibrium_models/
+            grad = (grad,)+(0,)*(len(fp)-1)
+            new_grad = tuple(grad[i]+torch.zeros_like(fp[i]) for i in range(len(fp)))
+            res = float('inf')
+            it = 0
+            # while res > self.tol: #TODO: use faster alg e.g. anderson
+            for _ in range(10000):
+                new_grad_prev = new_grad
+                new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)
+                new_grad = tuple(new_grad[i]+grad[i] for i in range(len(new_grad)))
+                res = ((t2v(new_grad) - t2v(new_grad_prev)).norm()/t2v(new_grad).norm()).item()
+                it += 1
+                if it%100==0:
+                    print('it', it, ' res', res)
+                if res <= self.tol:
+                    break
+            print('it', it, ' res', res)
+            return new_grad[0]
+
+        fp[0].register_hook(backward_hook)
+        return fp
+
+
+
+#        if self.grad_mode == 'exact':
+
+        # elif self.grad_mode == 'first-heuristic':
+        #     fp_out = tuple(a+b for a,b in zip(fp_out, fp_in))
+        #     def backward_hook(grad):
+        #         #TODO: y should not require grad (should be able to put None instead of zeros_like)
+        #         return torch.autograd.grad(fp_out, fp_in, (grad, None))[0]

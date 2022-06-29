@@ -69,6 +69,8 @@ def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
     ax.set_yticks([])
     ax.set_title(title)
 
+    return ax
+
 
 def plot_data_batch(inputs, targets, outputs=None, ax=None):
     if outputs is None:

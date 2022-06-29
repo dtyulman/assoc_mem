@@ -2,7 +2,7 @@ import itertools, warnings
 from collections.abc import MutableMapping, Mapping
 from copy import deepcopy
 
-import networks
+import networks, training
 
 
 class Config(MutableMapping):
@@ -134,7 +134,7 @@ def verify_config(config, mode='raise'):
             'data.values.normalize': ['data', False]
             }
 
-    if config['train.approx'] != False:
+    if config['train.approx'] != False or config['train.class'] != 'FPTrain':
         constraint.update({'train.verify_grad': ''})
 
     assert config['data.values.num_samples'] is None or config['train.batch_size'] <= config['data.values.num_samples']

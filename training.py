@@ -28,7 +28,8 @@ class AssociativeTrain():
 
         self.train_loader = train_loader
         self.test_loader = test_loader
-        self.n_class_units = train_loader.dataset.dataset.num_classes #Mc
+        if loss_mode=='class':
+            self.n_class_units = train_loader.dataset.dataset.num_classes #Mc
 
         self.optimizer = torch.optim.Adam(net.parameters()) if optimizer is None else optimizer
 
@@ -231,7 +232,7 @@ class BPTrain(AssociativeTrain):
 
 
 class FPTrain(AssociativeTrain):
-    def __init__(self, net, train_loader, test_loader=None, verify_grad=False,
+    def __init__(self, net, train_loader, test_loader=None, verify_grad='',
                  approx=False, **kwargs):
         #explicit test_loader kwarg also allows it to be passed as positional arg
         super().__init__(net, train_loader, test_loader, **kwargs)
@@ -385,8 +386,8 @@ class FPTrain(AssociativeTrain):
             D_beta = f_first_order.D_beta(h)
         else:
             f = self.net.f(h)
-            Jf = self.net.f.J(None, f)
-            D_beta = self.net.f.D_beta(h)
+            Jf = self.net.f.J(h, f)
+            # D_beta = self.net.f.D_beta(h)
         del h
 
         if self.approx == False:
@@ -411,7 +412,7 @@ class FPTrain(AssociativeTrain):
         dLdW += Jf.transpose(-2,-1) @ W @ a_ @ g.transpose(-2,-1)
         dLdW = dLdW.mean(0)
 
-        dLdB = ((W @ a_).transpose(-2,-1) @ D_beta).mean()
+        dLdB = None#((W @ a_).transpose(-2,-1) @ D_beta).mean()
 
         return dLdW, dLdB
 

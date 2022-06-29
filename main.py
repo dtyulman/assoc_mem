@@ -20,14 +20,14 @@ import utils, data, training, networks, plots
 import configs as cfg
 #%%
 train_config = cfg.Config({
-    'class': 'BPTrain', #FPTrain, BPTrain
+    'class': 'FPTrain', #FPTrain, BPTrain
     'batch_size': 2,
     #FPTrain only
-    'verify_grad': '', # '', 'num', 'bptt', 'num+bptt'
+    'verify_grad': 'bptt', # '', 'num', 'bptt', 'num+bptt'
     'approx': False, #False, first, first-heuristic, inv-heuristic
 
     'optim': {'class': 'Adam', #CustomOpt, Adam
-              'lr': .002,
+              'lr': .001,
               #Adam only
               'weight_decay': 1e-9,
               'amsgrad': False,
@@ -48,44 +48,44 @@ train_config = cfg.Config({
     'reg_fn': None, #L2, None
     'reg_rate': None,
 
-    'epochs': 50000,
+    'epochs': 1,
     'print_every': 10,
     'sparse_log_factor': 5,
     'device': 'cuda', #cuda, cpu
     })
 
 net_config = cfg.Config({
-    'class': 'ConvolutionalMem', #LargeAssociativeMem or ConvolutionalMem
+    'class': 'LargeAssociativeMem', #LargeAssociativeMem or ConvolutionalMem
     'fp_thres': -1, #must be small or torch.allclose(FP_grad, BP_grad) fails
     'max_num_steps': 500,
-    'dt': .1,
+    'dt': .05,
 
     # #Conv only
-    'x_size' : None, #if None, infer from dataset
-    'x_channels' : None, #if None, infer from dataset
-    'y_channels' : 50,
-    'kernel_size' : 8,
-    'stride' : 1,
-    'z_size' : 50,
+    # 'x_size' : None, #if None, infer from dataset
+    # 'x_channels' : None, #if None, infer from dataset
+    # 'y_channels' : 50,
+    # 'kernel_size' : 8,
+    # 'stride' : 1,
+    # 'z_size' : 50,
 
     #LAM only
-    # 'input_size': None, #if None, infer from dataset
-    # 'hidden_size': 25,
-    # 'init': 'random', #random, data_mean, inputs, targets
-    # 'normalize_weight': False,
-    # 'f': networks.Softmax(beta=5, train=False),
-    # 'g': networks.Identity(),
-    # 'normalize_input': False, #don't use this. normalizes post-perturbation but before showing it to network, including before clamping (data.normalize does it pre-perturbation, g=Spherical does it post, but at every step)
-    # 'input_mode': 'clamp', #init, cont, init+cont, clamp
-    # 'tau': 1.,
-    # 'check_converged': True,
-    # 'fp_mode': 'iter', #iter, del2
-    # 'dropout': False, #float in (0,1), or False
+    'input_size': None, #if None, infer from dataset
+    'hidden_size': 25,
+    'init': 'random', #random, data_mean, inputs, targets
+    'normalize_weight': False,
+    'f': networks.Softmax(beta=5, train=False),
+    'g': networks.Identity(),
+    'normalize_input': False, #don't use this. normalizes post-perturbation but before showing it to network, including before clamping (data.normalize does it pre-perturbation, g=Spherical does it post, but at every step)
+    'input_mode': 'clamp', #init, cont, init+cont, clamp
+    'tau': 1.,
+    'check_converged': True,
+    'fp_mode': 'iter', #iter, del2
+    'dropout': False, #float in (0,1), or False
     })
 
 
 data_values_config = cfg.Config({
-    'class': 'CIFAR10Dataset', #MNISTDataset, RandomDataset, CIFAR10Dataset
+    'class': 'MNISTDataset', #MNISTDataset, RandomDataset, CIFAR10Dataset
     'include_test': False,
     'num_samples': 2, #if None takes entire MNIST/CIFAR, requires int for RandomDataset
 
@@ -168,7 +168,7 @@ configs, labels = cfg.flatten_config_loop(baseconfig, deltaconfigs, mode=mode)
 saveroot = utils.initialize_savedir(baseconfig)
 device = None
 for config, label in zip(configs, labels):
-    torch.random.manual_seed(3)
+    torch.random.manual_seed(1)
 
     cfg.verify_config(config)
     config_copy = deepcopy(config)
@@ -270,7 +270,7 @@ for config, label in zip(configs, labels):
     #go
     net.to(device)
     logger = trainer(epochs, label=label)
-    logger.add_text('config', str(config_copy))
+    logger.add_text('config', str(config_copy)) #TODO: add before training
 
     # joblib.dump(logger, os.path.join(savedir, 'log.pkl'))
     net.to('cpu')
