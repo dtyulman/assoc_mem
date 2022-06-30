@@ -1,5 +1,5 @@
 from copy import deepcopy
-import math
+import math, time
 
 import torch
 from torch import nn
@@ -127,10 +127,36 @@ class ConvMem(nn.Module):
         y = self.W.t() @ g #[CyMM,N]@[B,N,1]->[B,CyMM,1]
         return y.reshape(g.shape[0], self.Cy, self.M, self.M) #[B,Cy,M,M]
 
+    def _step(self, x_prev, f_prev):
+        g = self.g( self.fc(f_prev) )
+        f = self.f( self.fcT(g) + self.conv(x_prev) )
 
+        #THIS IS THE BUG
+        x = self.convT(f_prev) #this is technically the correct dynamics
+        # x = self.convT(f) #this matches bptt/rbp with tuples
+
+        f = (1-self.eta_y)*f_prev + self.eta_y*f
+        x = (1-self.eta_x)*x_prev + self.eta_x*x
+        return x,f
+
+    def pack(self, x, f):
+        B = x.shape[0]
+        return torch.cat([x.reshape(B,-1), f.reshape(B,-1)], dim=1)
+
+    def unpack(self, s):
+        B = s.shape[0]
+        len_x = self.Cx*self.L*self.L
+        x = s[:,:len_x].reshape(B,self.Cx,self.L,self.L)
+        f = s[:,len_x:].reshape(B,self.Cy,self.M,self.M)
+        return x,f
+
+    def init_f0(self, B):
+        return torch.zeros(B,self.Cy,self.M,self.M)
+
+    ### Using tuples
     def forward(self, x0, f0=None):
         if f0 is None:
-            f0 = torch.rand(x0.shape[0],self.Cy,self.M,self.M)/100
+            f0 = self.init_f0(x0.shape[0])
         state = (x0, f0)
         for t in range(self.max_steps):
             prev_state = state
@@ -144,21 +170,14 @@ class ConvMem(nn.Module):
             print(f'FF not converged: t={t}, step={step_size}, thres={self.converged_thres}')
         return state
 
-
     def step(self, x_prev, f_prev):
-        g = self.g( self.fc(f_prev) )
-        f = self.f( self.fcT(g) + self.conv(x_prev) )
-        #THIS IS THE BUG
-        x = self.convT(f_prev)
-
-        f = (1-self.eta_y)*f_prev + self.eta_y*f
-        x = (1-self.eta_x)*x_prev + self.eta_x*x
-
-        return x,f
+        return self._step(x_prev, f_prev)
 
 
-    # def forward(self, input):
-    #     state = self.pack(input, torch.zeros(input.shape[0],self.Cy,self.M,self.M)) #([B,Cx,L,L],[B,Cy,M,M])
+    # ### Using packing
+    # def forward(self, x0):
+    #     f0 = self.init_f0(x0.shape[0])
+    #     state = self.pack(x0, f0) #([B,Cx,L,L],[B,Cy,M,M])
     #     for t in range(self.max_steps):
     #         prev_state = state
     #         state = self.step(prev_state)
@@ -171,32 +190,12 @@ class ConvMem(nn.Module):
     #         print(f'FF not converged: t={t}, step={step_size}, thres={self.converged_thres}')
     #     return state
 
-
     # def step(self, s_prev):
     #     x_prev, f_prev = self.unpack(s_prev)
-
-    #     g = self.g( self.fc(f_prev) )
-    #     f = self.f( self.fcT(g) + self.conv(x_prev) )
-    #     #THIS IS THE BUG
-    #     x = self.convT(f_prev) #this is technically the correct dynamics
-    #     # x = self.convT(f) #this matches bptt and rbp
-
-    #     f = (1-self.eta_y)*f_prev + self.eta_y*f
-    #     x = (1-self.eta_x)*x_prev + self.eta_x*x
-
+    #     x,f = self._step(x_prev, f_prev)
     #     return self.pack(x,f)
 
 
-    # def pack(self, x, f):
-    #     B = x.shape[0]
-    #     return torch.cat([x.reshape(B,-1), f.reshape(B,-1)], dim=1)
-
-    # def unpack(self, s):
-    #     B = s.shape[0]
-    #     len_x = self.Cx*self.L*self.L
-    #     x = s[:,:len_x].reshape(B,self.Cx,self.L,self.L)
-    #     f = s[:,len_x:].reshape(B,self.Cy,self.M,self.M)
-    #     return x,f
 
 
 #########
@@ -212,15 +211,25 @@ class Trainer():
     def train(self, epochs=1):
         for epoch in range(epochs):
             for i,(input,target) in enumerate(self.train_loader):
-                final_state = self.evaluate(input)
-                # output = self.net.unpack(final_state)[0]
-                output = final_state[0]
+                output = self.evaluate(input)
+
+                ### Using tuples doesnt propagate gradient
+                # output = output[0]
+
+                ### Using tuples computes grad but wrong because bw hook only
+                ### updates grad_x, but grad_y is still (incorrectly) zero
+                # target = self.net.pack(target, output[1])
+                # output = self.net.pack(*output)
+
+                ### Using packing
+                # output = self.net.unpack(output)[0]
+
+                ### Using packing but only inside evaluate
+                output = output[0]
+
+
                 loss = self.loss_fn(output, target)
-                # output = torch.cat([fs.flatten() for fs in final_state])
-                # output = output[:final_state[0].shape[0]*self.net.Cx*self.net.L**2]
-                # loss = self.loss_fn(output,target.flatten())
                 self.optimizer.zero_grad()
-                final_state[1].backward(torch.zeros_like(final_state[1]),retain_graph=True)
                 loss.backward()
                 self.optimizer.step()
 
@@ -234,37 +243,57 @@ class RBPTrainer(Trainer):
         self.max_steps = int(max_steps)
         self.converged_thres = converged_thres
 
+    # def evaluate(self, input):
+    #     with torch.no_grad():
+    #         fp = to_tuple(self.net(input))
+    #     fp = to_tuple(self.net.step(*fp))
+
+    #     fp_in = tuple_copy_require_grad(fp)
+    #     fp_out = to_tuple(self.net.step(*fp_in))
+    #     def backward_hook(grad):
+    #         grad = (grad,) + tuple(torch.zeros_like(fp_i) for fp_i in fp_in[1:])
+    #         new_grad = grad
+    #         for t in range(self.max_steps):
+    #             new_grad_prev = new_grad
+    #             new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)
+    #             new_grad = tuple_sum(new_grad, grad)
+    #             rel_res = tuple_residual(new_grad, new_grad_prev)
+    #             if rel_res <= self.converged_thres:
+    #                 print(f'BP converged: it={t} res={rel_res}')
+    #                 break
+    #         if t >= self.max_steps-1:
+    #             print(f'BP not converged: t={t}, res={rel_res}')
+    #         return new_grad[0]
+
+    #     fp[0].register_hook(backward_hook)
+    #     return fp #using tuples
+    #     # return fp[0] #using packing
+
+
+    ### Using packing but only inside evaluate, (tuples in network)
     def evaluate(self, input):
         with torch.no_grad():
             fp = to_tuple(self.net(input))
         fp = to_tuple(self.net.step(*fp))
 
-        fp_in = tuple_copy_require_grad(fp)
-        fp_out = to_tuple(self.net.step(*fp_in))
-        def backward_hook_0(grad):
-            grad = (grad,) + tuple(torch.zeros_like(fp_i) for fp_i in fp_in[1:])
+        fp_in = self.net.pack(*tuple_copy_require_grad(fp))
+        fp_out = self.net.pack(*to_tuple(self.net.step(*self.net.unpack(fp_in))))
+        def backward_hook(grad):
             new_grad = grad
             for t in range(self.max_steps):
                 new_grad_prev = new_grad
-                new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)
-                new_grad = tuple_sum(new_grad, grad)
-                rel_res = tuple_residual(new_grad, new_grad_prev)
+                new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)[0] + grad
+                rel_res = ((new_grad - new_grad_prev).norm()/new_grad.norm()).item()
                 if rel_res <= self.converged_thres:
                     print(f'BP converged: it={t} res={rel_res}')
                     break
             if t >= self.max_steps-1:
                 print(f'BP not converged: t={t}, res={rel_res}')
+            return new_grad
 
-            def backward_hook_1(grad):
-                return new_grad[1]
-            fp[1].register_hook(backward_hook_1)
-
-            return new_grad[0]
-
-
-        fp[0].register_hook(backward_hook_0)
-        return fp
-
+        fp = self.net.pack(*fp)
+        fp.register_hook(backward_hook)
+        return self.net.unpack(fp)
 
 ###########
 # Helpers #
@@ -288,11 +317,27 @@ def tuple_sum(tup1, tup2):
 def tuple_copy_require_grad(tup):
     return tuple(t.detach().clone().requires_grad_() for t in tup)
 
+class Timer():
+    def __init__(self, name=None):
+        self.name = name
+
+    def __enter__(self):
+        print('Starting timer{}'.format(f': {self.name}...' if self.name is not None else '...'))
+        self.start_time = time.perf_counter()
+
+    def __exit__(self, *args):
+        stop_time = time.perf_counter()
+        elapsed = stop_time - self.start_time
+        details_str = f' ({self.name})' if self.name is not None else ''
+        elapsed_str = 'Time elapsed{}: {} sec'.format(details_str, elapsed)
+        print(elapsed_str)
 
 
 
 #%%
-seed = 7794304876649799699#torch.random.seed()
+seed = torch.random.seed()
+torch.random.manual_seed(seed)
+
 B = 1
 
 # N = 50
@@ -313,15 +358,15 @@ train_loader = DataLoader(train_data, batch_size=B, shuffle=False)
 net_bptt = ConvMem(L, Cx, Cy, N, K, converged_thres=0)
 net_rbp = deepcopy(net_bptt)
 
-print('RBP Train')
 torch.random.manual_seed(seed)
-trainer_rbp = RBPTrainer(net_rbp, train_loader)
-trainer_rbp.train()
+with Timer('RBP Train'):
+    trainer_rbp = RBPTrainer(net_rbp, train_loader)
+    trainer_rbp.train()
 
-print('BPTT Train')
 torch.random.manual_seed(seed) #reseed because f0 is random
-trainer_bptt = Trainer(net_bptt, train_loader)
-trainer_bptt.train()
+with Timer('BPTT Train'):
+    trainer_bptt = Trainer(net_bptt, train_loader)
+    trainer_bptt.train()
 
 
 print('conv.w.grad mean err=',(net_bptt.conv.weight.grad-net_rbp.conv.weight.grad).abs().mean().item(),
