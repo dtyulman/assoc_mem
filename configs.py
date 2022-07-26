@@ -1,9 +1,8 @@
-import itertools, warnings
+import itertools, warnings, os, datetime, glob
 from collections.abc import MutableMapping, Mapping
 from copy import deepcopy
 
-import networks, training
-
+import networks, utils
 
 class Config(MutableMapping):
     """Nested dictionary that can be accessed by dot-separated keys
@@ -62,6 +61,30 @@ class Config(MutableMapping):
         return string
 
 
+def load_config(path):
+    with open(path, 'r') as f:
+        config = eval(f.read())
+    return config
+
+
+def initialize_savedir(baseconfig):
+    root = os.path.dirname(os.path.abspath(__file__))
+    ymd = datetime.date.today().strftime('%Y-%m-%d')
+    saveroot = os.path.join(root, 'results', ymd)
+    try:
+        prev_run_dirs = glob.glob(os.path.join(saveroot, '[0-9]*'))
+        prev_run_dirs = sorted([os.path.split(d)[-1] for d in prev_run_dirs])
+        run_number = int(prev_run_dirs[-1])+1
+    except (FileNotFoundError, IndexError, ValueError):
+        run_number = 0
+    savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
+    os.makedirs(savedir)
+    with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
+        f.write(repr(baseconfig)+'\n')
+    print(f'Saving to: {savedir}')
+    return savedir
+
+
 def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     """With baseconfig as the default, return a list of configs with the entries in deltaconfigs.keys()
     looped over the corresponding lists in deltaconfigs.values()"""
@@ -69,15 +92,18 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     assert all([param in baseconfig for param in deltaconfigs]), \
         'Varied parameters must exist in baseconfig'
 
-    if mode == 'combinatorial':
-        values_unzipped = itertools.product(*deltaconfigs.values())
-    elif mode == 'sequential':
-        len_params_list = len(list(deltaconfigs.values())[0])
-        assert all([len(values)==len_params_list for values in deltaconfigs.values()]), \
-            'Parameter lists must be of same length'
-        values_unzipped = zip(*deltaconfigs.values())
-    else:
-        raise ValueError(f'Invalid mode: {mode}')
+
+    values_unzipped = [()]
+    if len(deltaconfigs) > 0:
+        if mode == 'combinatorial':
+            values_unzipped = itertools.product(*deltaconfigs.values())
+        elif mode == 'sequential':
+            len_params_list = len(list(deltaconfigs.values())[0])
+            assert all([len(values)==len_params_list for values in deltaconfigs.values()]), \
+                'Parameter lists must be of same length'
+            values_unzipped = zip(*deltaconfigs.values())
+        else:
+            raise ValueError(f'Invalid mode: {mode}')
 
     configs = []
     labels = []
@@ -93,71 +119,97 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     return configs, labels
 
 
-def verify_items(config, constraint, mode='raise'):
-    """For each key in the constraint dict, asserts that config[key] is equal to that value. If not,
-    raises an error or sets the config item to that value and issues a warning"""
-    for key, value in constraint.items():
+# def verify_items(config, constraint, mode='raise'):
+#     """For each key in the constraint dict, asserts that config[key] is equal to that value. If not,
+#     raises an error or sets the config item to that value and issues a warning"""
+#     for key, value in constraint.items():
+#         try:
+#             satisfied_constraint = config[key] in value
+#         except:
+#             satisfied_constraint = config[key] == value
+
+#         if not satisfied_constraint:
+#             if mode == 'raise':
+#                 raise ValueError(f"Config error: {key}={config[key]}, requires {value}")
+#             elif mode == 'set':
+#                 warnings.warn(f"Config warning: setting {key}={config[key]} to {value}")
+#                 config[key] = value
+#             else:
+#                 raise ValueError(f"Invalid verify_item mode: '{mode}'")
+#     return config
+
+
+if __name__ == '__main__':
+    def test_Config():
+        #test init
+        d = {'a': 'a0',
+             'b' : {'1':'b1',
+                    '2':'b2'},
+             'b.3': 'b3',
+             'c': {'1': {'x':'c1x',
+                         'y':'c1y'},
+                   '2.x': 'c2x',
+                   '3.y': 'c3y'},
+             'c.4': {'x':'c4x',
+                     'y':'c4y'},
+             'c.4.z' : 'c4z',
+             'c.5.x' : 'c5x',
+             }
+
+        cfg = Config(d)
+        assert cfg['a'] == 'a0'
+        assert cfg['b.3'] == 'b3'
+        assert cfg['c.3'] == Config({'y': 'c3y'})
+        assert cfg['c.4.z'] == 'c4z'
+        assert cfg['c.4']['z'] == 'c4z'
+
+        #test delete
+        assert cfg.pop('c.4.z') == 'c4z'
+        assert cfg.pop('b') == Config({'1': 'b1', '2': 'b2', '3': 'b3'})
+
+        #test insert
+        cfg['d.1.x.ii'] = 'd1xii'
+        assert cfg['d.1.x.ii'] == 'd1xii'
+
+        #throws AssertionError
         try:
-            satisfied_constraint = config[key] in value
-        except:
-            satisfied_constraint = config[key] == value
+            cfg['x']
+        except KeyError as e:
+            assert e.args[0] == 'x'
 
-        if not satisfied_constraint:
-            if mode == 'raise':
-                raise ValueError(f"Config error: {key}={config[key]}, requires {value}")
-            elif mode == 'set':
-                warnings.warn(f"Config warning: setting {key}={config[key]} to {value}")
-                config[key] = value
-            else:
-                raise ValueError(f"Invalid verify_item mode: '{mode}'")
-    return config
+        print('test_Config: Pass')
 
 
-def verify_config(config, mode='raise'):
-    if config['data.mode.classify']:
-        constraint = {
-            'train.acc_fn': 'cls',
-            'train.acc_mode': 'class',
-            'data.mode.perturb_mode': 'last',}
-        if config['data.values.class'] == 'MNISTDataset':
-            constraint.update({'data.mode.perturb_entries': 10})
-        elif config['data.values.class'] == 'RandomDataset':
-            constraint.update({'data.mode.perturb_entries': config['data.values.num_classes']})
+    def test_flatten_config_loop():
+        baseconfig = Config({'a': 1, 'b': {'1':'p', '2':'q'}, 'c': None})
+        deltaconfigs = {'a': [1,2,3],
+                        'b.1': ['y','z']}
 
-        if config['net.input_mode'] == 'clamp':
-            constraint.update({'train.loss_mode': 'class'})
-    else:
-        constraint = {
-            # 'train.acc_fn': 'mae',
-            'train.acc_mode': 'full',
-            'train.loss_mode': 'full',
-            'data.values.normalize': ['data', False]
-            }
+        #correct
+        cfgs, labels = flatten_config_loop(baseconfig, deltaconfigs)
+        expectedconfigs = [Config({'a': 1, 'b.1': 'y', 'b.2': 'q', 'c': None}),
+                           Config({'a': 1, 'b.1': 'z', 'b.2': 'q', 'c': None}),
+                           Config({'a': 2, 'b.1': 'y', 'b.2': 'q', 'c': None}),
+                           Config({'a': 2, 'b.1': 'z', 'b.2': 'q', 'c': None}),
+                           Config({'a': 3, 'b.1': 'y', 'b.2': 'q', 'c': None}),
+                           Config({'a': 3, 'b.1': 'z', 'b.2': 'q', 'c': None})]
+        expectedlabels = ['a=1_1=y',
+                          'a=1_1=z',
+                          'a=2_1=y',
+                          'a=2_1=z',
+                          'a=3_1=y',
+                          'a=3_1=z']
+        assert cfgs == expectedconfigs, f'Output:{cfgs}, Expected:{expectedconfigs}'
+        assert labels == expectedlabels, f'Output:{labels}, Expected:{expectedlabels}'
 
-    if config['train.approx'] != False or config['train.class'] != 'FPTrain':
-        constraint.update({'train.verify_grad': ''})
-
-    assert config['data.values.num_samples'] is None or config['train.batch_size'] <= config['data.values.num_samples']
-
-    if config['net.class'] == 'LargeAssociativeMem':
-        if type(config['net.f']) == networks.Softmax and config['net.f'].beta.requires_grad:
-            constraint.update({'train.optim.beta_increment': False})
-        if type(config['net.g']) == networks.Spherical:
-            if config['data.mode.classify']:
-                constraint.update({'data.values.normalize': 'data+targets'})
-            else:
-                constraint.update({'data.values.normalize': 'data'})
-        if config['net.input_mode'] == 'clamp':
-            #normalizes after perturbation, so clamps an incorrectly normalized value
-            constraint.update({'net.normalize_input': False})
-        if config['net.init'] in ['inputs', 'targets']:
-            assert config['data.values.num_samples'] >= config['net.hidden_size']
+        #throws AssertionError
+        try:
+            deltaconfigs_bad = {'d': '1'} #fails because not in base
+            cfgs, labels = flatten_config_loop(baseconfig, deltaconfigs_bad)
+        except AssertionError as e:
+            assert e.args[0] == 'Varied parameters must exist in baseconfig'
+        print('test_flatten_config_loop: Pass')
 
 
-    return verify_items(config, constraint)
-
-
-def load_config(path):
-    with open(path, 'r') as f:
-        config = eval(f.read())
-    return config
+    test_Config()
+    test_flatten_config_loop()

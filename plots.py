@@ -1,93 +1,55 @@
+import math
+
+import torch
+import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from cycler import cycler #for making custom color cycles
-import numpy as np
-import torch
-import torchvision
-import math
+
+#https://matplotlib.org/stable/tutorials/colors/colormaps.html
+_DIVERGING_CMAPS = ['PiYG', 'PRGn', 'BrBG', 'PuOr', 'RdGy', 'RdBu', 'RdYlBu',
+                    'RdYlGn', 'Spectral', 'coolwarm', 'bwr', 'seismic']
 
 
-def plot_loss_acc(logger, plot_test=True, title=None, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots(2,1, sharex=True)
-
-    logger.plot_key('train/loss', label='Train', ax=ax[0])
-    logger.plot_key('train/acc', label='Train', ax=ax[1])
-    ax[0].set_ylabel('Loss')
-    ax[1].set_xlabel('Iterations')
-    ax[1].set_ylabel('Accuracy')
-    if title is not None:
-        ax[0].set_title(title)
-
-    if plot_test:
-        if 'test/loss' in logger:
-            logger.plot_key('test/loss', label='Test', ax=ax[0])
-            ax[0].legend()
-        if 'test/acc' in logger:
-            logger.plot_key('test/acc', label='Test', ax=ax[1])
-    return ax
-
-
-def _plot_rows(mat, drop_last=0, pad_nan=True, title='', ax=None,
-               cbar=True, cmap='RdBu_r', vmin=None, vmax=None):
+def plot_matrix(mat, title='', cbar=True, cmap='RdBu_r', vmin=None, vmax=None, ax=None):
+    """mat: numpy array or pytorch tensor"""
     fig, ax = prep_axes(ax)
-    mat = mat.squeeze(dim=-1)
+    mat = prep_matrix(mat)
 
-    if len(mat.shape) == 2: #[B,M] for data batch or [N,M] for a weight matrix
-        try:
-            mat = mat.cpu().detach().numpy()
-        except:
-            pass
-        imgs = rows_to_images(mat, drop_last=drop_last, pad_nan=pad_nan)
-        grid = images_to_grid(imgs, vpad=1, hpad=1)
-    elif len(mat.shape) == 4: #[B,C,L,L] for image data batch
-        assert drop_last==0
-        cbar=False
-        rows,_ = length_to_rows_cols(len(mat))
-        grid = torchvision.utils.make_grid(mat, rows, normalize=True, padding=1,
-                                           pad_value=torch.tensor(float('nan')))
-        try:
-            grid = grid.cpu().detach().numpy()
-        except:
-            pass
-        grid = np.transpose(grid, (1,2,0))
-
-
-    if vmin is None and vmax is None and cmap == 'RdBu_r':
-        vmax = np.nanmax(np.abs(grid))
+    if vmin is None and vmax is None and cmap in _DIVERGING_CMAPS:
+        vmax = np.nanmax(np.abs(mat))
         vmin = -vmax
-    im = ax.imshow(grid, cmap=cmap, vmin=vmin, vmax=vmax)
+    im = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax)
 
-    if cbar:
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im, cax=cax)
+    if cbar and len(mat.shape)==2: #mat can be [M,N] or [M,N,3(4)] for RGB(A) image
+        add_colorbar(im, ax)
 
-
-    [ax.spines[spine].set_visible(False) for spine in ['top', 'bottom', 'left', 'right']]
-    ax.set_xticks([])
-    ax.set_yticks([])
+    clear_ax_spines(ax)
     ax.set_title(title)
 
-    return ax
+    return fig, ax
 
 
-def plot_data_batch(inputs, targets, outputs=None, ax=None):
-    if outputs is None:
-        fig, axs = prep_axes(ax,1,2, sharex=True, sharey=True)
-        v = max(inputs.abs().max(), targets.abs().max())
-        _plot_rows(inputs,  ax=axs[0], title='Inputs',  cmap='RdBu_r', vmin=-v, vmax=v)
-        _plot_rows(targets, ax=axs[1], title='Targets', cmap='RdBu_r', vmin=-v, vmax=v)
-        scale_fig(fig, 1.5)
-    else:
-        fig, axs = prep_axes(ax,1,3, sharex=True, sharey=True)
-        v = max(inputs.abs().max(), targets.abs().max(), outputs.abs().max())
-        _plot_rows(inputs,  ax=axs[0], title='Inputs',  cmap='RdBu_r', vmin=-v, vmax=v)
-        _plot_rows(targets, ax=axs[1], title='Targets', cmap='RdBu_r', vmin=-v, vmax=v)
-        _plot_rows(outputs, ax=axs[2], title='Outputs', cmap='RdBu_r', vmin=-v, vmax=v)
-        scale_fig(fig, 2)
-    fig.tight_layout()
-    return axs
+def plot_matrices(mat_list, title_list=None, ax=None,
+                  ax_rows=None, ax_cols=None, **kwargs):
+    """mat_list: a list of numpy arrays or pytorch tensors"""
+    ax_rows, ax_cols = length_to_rows_cols(len(mat_list), ax_rows, ax_cols)
+    fig, ax = prep_axes(ax, ax_rows, ax_cols)
+    mat_list = [prep_matrix(mat) for mat in mat_list]
+
+    if title_list is None:
+        title_list = ['' for _ in len(mat_list)]
+
+    vmax = max([np.nanmax(np.abs(mat)) for mat in mat_list])
+    vmin = -vmax
+    cbar = kwargs.pop('cbar', True)
+    for i, (mat,title,ax) in enumerate(zip(mat_list, title_list, ax.flatten())):
+        if i==len(mat_list)-1:
+            plot_matrix(mat, title, ax=ax, vmax=vmax, vmin=vmin, cbar=cbar, **kwargs)
+        else:
+            plot_matrix(mat, title, ax=ax, vmax=vmax, vmin=vmin, cbar=False, **kwargs)
+    return fig, ax
+
 
 
 def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0, ax=None):
@@ -111,26 +73,6 @@ def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0, ax=None):
 
     return _plot_rows(outputs, drop_last=drop_last, title='Fixed points', ax=ax)
 
-
-
-def plot_weights(net=None, _W=None, W=None, drop_last=0, ax=None):
-    if net is not None:
-        assert _W is None and W is None, 'Do not provide weight matrix if passing in net object'
-        _W = net._W
-        if net.normalize_weight:
-            W = net.W
-
-    if W is not None:
-        fig, ax = prep_axes(ax,1,2, sharex=True, sharey=True)
-        _plot_rows(_W, ax=ax[0], drop_last=drop_last, title='_W (raw)')
-        _plot_rows(W, ax=ax[1], drop_last=drop_last, title='W (normalized)')
-        scale_fig(fig, 1.5)
-    else:
-        fig, ax = prep_axes(ax)
-        _plot_rows(_W, drop_last=drop_last, title='Raw (no normalization)', ax=ax)
-    # fig.tight_layout()
-
-    return ax
 
 
 def plot_hidden_max_argmax(state_debug_history, n_per_class=None, apply_nonlin=True, ax=None):
@@ -354,7 +296,40 @@ def prep_axes(ax=None, nrows=1, ncols=1, **kwargs):
     return fig, ax
 
 
+def prep_matrix(mat):
+    if isinstance(mat, torch.Tensor):
+        return mat.cpu().detach().numpy()
+    return mat
+
+
 def scale_fig(fig, wscale=1, hscale=1):
     w,h = fig.get_size_inches()
     fig.set_size_inches(wscale*w, hscale*h)
     return fig
+
+
+def clear_ax_spines(ax):
+    #remove ticks and spines manually because ax.axis('off') also removes labels
+    [ax.spines[spine].set_visible(False) for spine in ['top', 'bottom', 'left', 'right']]
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def add_colorbar(mappable, ax, position='right', size='2%', pad=0.05):
+    fig = ax.get_figure()
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes(position, size, pad)
+    fig.colorbar(mappable, cax=cax)
+
+
+class NonInteractiveContext:
+    """ Use this as a context manager to silently plot a figure, e.g. for
+    logging to tensorboard without showing the plot or stealing window focus
+    """
+    def __enter__(self):
+        self.was_interactive = plt.isinteractive()
+        plt.ioff()
+
+    def __exit__(self, *args):
+        if self.was_interactive:
+            plt.ion()

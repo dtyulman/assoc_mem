@@ -1,32 +1,5 @@
-import os, glob, datetime, gc, warnings
+import os, gc, warnings
 import torch, joblib
-
-
-def initialize_savedir(baseconfig):
-    # TODO: folder structure should be
-    # assoc_mem/results/
-    # | -- yyyy-mm-dd/
-    # | | -- nnnn/
-    # | | | -- baseconfig.txt
-    # | | | -- deltaconfiglabel/
-    # | | | | -- net.pt
-    # | | | | -- log.pkl
-    # | | | | -- config.pkl
-    root = os.path.dirname(os.path.abspath(__file__))
-    ymd = datetime.date.today().strftime('%Y-%m-%d')
-    saveroot = os.path.join(root, 'results', ymd)
-    try:
-        prev_run_dirs = glob.glob(os.path.join(saveroot, '[0-9]*'))
-        prev_run_dirs = sorted([os.path.split(d)[-1] for d in prev_run_dirs])
-        run_number = int(prev_run_dirs[-1])+1
-    except (FileNotFoundError, IndexError, ValueError):
-        run_number = 0
-    savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
-    os.makedirs(savedir)
-    with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
-        f.write(repr(baseconfig)+'\n')
-    print(f'Saving to: {savedir}')
-    return savedir
 
 
 def choose_device(dev_str):
