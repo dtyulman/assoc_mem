@@ -9,6 +9,7 @@ from cycler import cycler #for making custom color cycles
 #https://matplotlib.org/stable/tutorials/colors/colormaps.html
 _DIVERGING_CMAPS = ['PiYG', 'PRGn', 'BrBG', 'PuOr', 'RdGy', 'RdBu', 'RdYlBu',
                     'RdYlGn', 'Spectral', 'coolwarm', 'bwr', 'seismic']
+_DIVERGING_CMAPS += [cm+'_r' for cm in _DIVERGING_CMAPS]
 
 
 def plot_matrix(mat, title='', cbar=True, cmap='RdBu_r', vmin=None, vmax=None, ax=None):
@@ -21,8 +22,8 @@ def plot_matrix(mat, title='', cbar=True, cmap='RdBu_r', vmin=None, vmax=None, a
         vmin = -vmax
     im = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax)
 
-    if cbar and len(mat.shape)==2: #mat can be [M,N] or [M,N,3(4)] for RGB(A) image
-        add_colorbar(im, ax)
+    if cbar and len(mat.shape)==2 or cbar=='placeholder': #mat can be [M,N] or [M,N,3(4)] for RGB(A) image
+        add_colorbar(im, ax, placeholder=(cbar=='placeholder'))
 
     clear_ax_spines(ax)
     ax.set_title(title)
@@ -43,11 +44,11 @@ def plot_matrices(mat_list, title_list=None, ax=None,
     vmax = max([np.nanmax(np.abs(mat)) for mat in mat_list])
     vmin = -vmax
     cbar = kwargs.pop('cbar', True)
-    for i, (mat,title,ax) in enumerate(zip(mat_list, title_list, ax.flatten())):
+    for i, (mat,title,ax_i) in enumerate(zip(mat_list, title_list, ax.flatten())):
         if i==len(mat_list)-1:
-            plot_matrix(mat, title, ax=ax, vmax=vmax, vmin=vmin, cbar=cbar, **kwargs)
+            plot_matrix(mat, title, ax=ax_i, vmax=vmax, vmin=vmin, cbar=cbar, **kwargs)
         else:
-            plot_matrix(mat, title, ax=ax, vmax=vmax, vmin=vmin, cbar=False, **kwargs)
+            plot_matrix(mat, title, ax=ax_i, vmax=vmax, vmin=vmin, cbar='placeholder', **kwargs)
     return fig, ax
 
 
@@ -315,11 +316,14 @@ def clear_ax_spines(ax):
     ax.set_yticks([])
 
 
-def add_colorbar(mappable, ax, position='right', size='2%', pad=0.05):
+def add_colorbar(mappable, ax, position='right', size='2%', pad=0.05, placeholder=False):
     fig = ax.get_figure()
     divider = make_axes_locatable(ax)
     cax = divider.append_axes(position, size, pad)
-    fig.colorbar(mappable, cax=cax)
+    if placeholder:
+        cax.axis('off')
+    else:
+        fig.colorbar(mappable, cax=cax)
 
 
 class NonInteractiveContext:

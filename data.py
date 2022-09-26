@@ -1,11 +1,9 @@
-from copy import deepcopy
-
 import numpy as np
 import torch, torchvision
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-import plots, networks
+import plots
 
 class AssociativeDataset(Dataset):
     def __init__(self, data, labels=None, perturb_mask='last', perturb_entries=0.5, perturb_value=0):
@@ -19,14 +17,14 @@ class AssociativeDataset(Dataset):
 
     def set_perturb_frac_and_num(self, perturb_entries):
         total_entries = self.data[0].numel()
-        if perturb_entries < 1: #specified the fraction of entries to perturb
+        if perturb_entries < 1: #user specified the *fraction* of entries to perturb
             self.perturb_frac = perturb_entries
             self.perturb_num = int(total_entries*self.perturb_frac)
-        else: #specified the number of entries to perturb
+        else: #user specified the *number* of entries to perturb
             self.perturb_num = perturb_entries
             self.perturb_frac = float(self.perturb_num) / total_entries
-        assert 0 < self.perturb_frac < 1, 'Must have 0 < perturb_frac ({self.perturb_frac}) < 1'
-        assert self.perturb_num < total_entries, 'Must have perturb_num ({self.perturb_num}) < input_size ({total_entries})'
+        assert 0 <= self.perturb_frac <= 1, f'Must have 0 <= perturb_frac ({self.perturb_frac}) <= 1'
+        assert self.perturb_num <= total_entries, f'Must have perturb_num ({self.perturb_num}) <= input_size ({total_entries})'
 
 
     def set_perturb_value(self, value):
@@ -77,7 +75,7 @@ class AssociativeDataset(Dataset):
 
 
     def perturb(self, datapoint):
-        datapoint = deepcopy(datapoint) #prevent in-place modification
+        datapoint = torch.empty_like(datapoint).copy_(datapoint) #prevent in-place modification
         mask = self.get_perturb_mask(datapoint)
         value = self.get_perturb_value(datapoint, mask)
         datapoint[mask] = value
@@ -105,25 +103,26 @@ class AssociativeDataset(Dataset):
         return grid
 
 
-    def plot_batch(self, inputs=None, targets=None, outputs=None, num_samples=100):
+    def plot_batch(self, num_samples=100, inputs=None, targets=None, outputs=None, ax_rows=1, **kwargs):
         if inputs is None and targets is None:
             inputs, targets, _ = next(iter(
                 DataLoader(self, batch_size=num_samples, shuffle=True)
                 ))
 
         named_batches = {'Inputs': inputs, 'Targets': targets, 'Outputs': outputs}
+        named_batches.update(**kwargs)
         grids, titles = [], []
         for title, batch in named_batches.items():
             if batch is not None:
                 grids.append(self.batch_to_grid(batch.cpu()))
                 titles.append(title)
 
-        return plots.plot_matrices(grids, titles, ax_rows=1)
+        return plots.plot_matrices(grids, titles, ax_rows=ax_rows)
 
 
 
 class AssociativeRandom(AssociativeDataset):
-    def __init__(self, num_samples=50, input_size=20, num_classes=2, normalize=False,
+    def __init__(self, input_size=20, num_samples=50, num_classes=2, normalize=False,
                  data_kwargs={'distribution':'bern'},
                  **perturb_kwargs):
 
@@ -161,6 +160,7 @@ class AssociativeMNIST(AssociativeDataset):
                  downsample=False,
                  normalize=False,
                  **perturb_kwargs):
+        #data is image only, no class info
         data, labels = self.load_and_preprocess(num_samples, select_classes, n_per_class,
                                                 train_or_test, crop, downsample, normalize)
         super().__init__(data, labels, **perturb_kwargs)
@@ -182,7 +182,7 @@ class AssociativeMNIST(AssociativeDataset):
             data = data[:, crop:-crop, crop:-crop]
         if downsample: #take every `downsample`th pixel vertically and horizontally
             data = data[:, ::downsample, ::downsample]
-        data = data.reshape(data.shape[0], -1) #flatten
+        data = data.reshape(data.shape[0], -1) #flatten to [D,784]
         if normalize: #normalize each row to unit vector
             data = data/data.norm(dim=1, keepdim=True)
 
@@ -190,7 +190,8 @@ class AssociativeMNIST(AssociativeDataset):
 
 
 
-def AssociativeClassifyMNIST(AssociativeMNIST):
+class AssociativeClassifyMNIST(AssociativeMNIST):
+    """Given the 784 pix image produce the 10 one-hot class pixels"""
     def __init__(self,
                  num_samples=None,
                  select_classes='all',
@@ -199,25 +200,55 @@ def AssociativeClassifyMNIST(AssociativeMNIST):
                  crop=False,
                  downsample=False,
                  normalize=False, #'image_only', 'full_input', False
-                 perturb_value=0
-                 ):
-
+                 perturb_value=0):
         assert normalize in ['image_only', 'full_input', False]
         data, labels = self.load_and_preprocess(num_samples, select_classes, n_per_class,
                                                 train_or_test, crop, downsample,
                                                 normalize=(normalize=='image_only'))
 
         #data is concatenated flattened_image + onehot_target
+        data = self.concatenate(data, labels, normalize=(normalize=='full_input'))
         num_classes = len(labels.unique())
-        targets = F.one_hot(labels, num_classes=num_classes)
-        data = torch.cat((data,targets))
-        if normalize == 'full_input':
-            data = data/data.norm(dim=1, keepdim=True)
-
         super().__init__(data, labels,
                          perturb_mask='last',
                          perturb_entries=num_classes,
                          perturb_value=perturb_value)
+
+
+    def concatenate(self, data, labels, normalize=False):
+        num_classes = len(labels.unique())
+        targets = F.one_hot(labels, num_classes=num_classes)
+        data = torch.cat((data,targets))
+        if normalize:
+            data = data/data.norm(dim=1, keepdim=True)
+        return data
+
+
+
+class AssociativeGenerateMNIST(AssociativeClassifyMNIST):
+    """Given the 10 one-hot class pixels, generate the full 784 pix image"""
+    def __init__(self,
+             num_samples=None,
+             select_classes='all',
+             n_per_class='all', #'all', int, or length-<len(select_classes)> list
+             train_or_test='train',
+             crop=False,
+             downsample=False,
+             normalize=False,
+             perturb_value=0):
+        assert normalize in ['image_only', 'full_input', False]
+        data, labels = self.load_and_preprocess(num_samples, select_classes, n_per_class,
+                                                train_or_test, crop, downsample,
+                                                normalize=(normalize=='image_only'))
+
+        #data is concatenated flattened_image + onehot_target
+        data = self.concatenate(data, labels, normalize=(normalize=='full_input'))
+        num_image_pixels = data.shape[1]
+        super().__init__(data, labels,
+                         perturb_mask='first',
+                         perturb_entries=num_image_pixels,
+                         perturb_value=perturb_value)
+
 
 
 
@@ -272,6 +303,7 @@ class AssociativeCIFAR10(AssociativeDataset):
 
 def filter_by_class(data, labels, num_samples=None, select_classes='all', n_per_class='all', sort_by_class=True):
     if num_samples is not None:
+        raise Exception("This probably doesn't work the way you are expecting.") #TODO
         data = data[:num_samples]
         labels = labels[:num_samples]
 
@@ -280,11 +312,14 @@ def filter_by_class(data, labels, num_samples=None, select_classes='all', n_per_
             return data, labels
         select_classes = labels.unique()
 
+    if isinstance(n_per_class, int) or n_per_class == 'all':
+        n_per_class = [n_per_class]*len(select_classes)
+
     selected_idx_per_class = []
-    for c in select_classes:
+    for c,nc in zip(select_classes, n_per_class):
         idx = (labels == c).nonzero().squeeze().view(-1) #get indices corresponding to this class
-        if n_per_class != 'all':
-            idx = idx[:n_per_class] #only take the first n_per_class items of this class
+        if nc != 'all':
+            idx = idx[:nc] #only take the first nc items of this class
         selected_idx_per_class.append(idx)
     selected_idx = torch.cat((selected_idx_per_class))
 

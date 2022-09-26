@@ -164,7 +164,7 @@ class AssociativeMemory(pl.LightningModule):
         self.log('train/loss', loss.item())
         self.log('train/acc', acc.item())
 
-        return {'loss':loss,
+        return {'loss': loss,
                 'output': tuple(o.detach() for o in output)}
 
 
@@ -228,8 +228,11 @@ class AssociativeMemory(pl.LightningModule):
 
 
 
+
+
+
 class LargeAssociativeMemory(AssociativeMemory):
-    """ From Krotov and Hopfield 2020
+    """From Krotov and Hopfield 2020
     x: [B,N] (feature)
     y: [B,M] (hidden)
     """
@@ -262,7 +265,7 @@ class LargeAssociativeMemory(AssociativeMemory):
         return {'input_size' : train_data[0][0].numel()}
 
 
-    def plot_weights(self, weights='weights', title='', drop_last=0, pad_nan=True):
+    def plot_weights(self, weights='weights', drop_last=0, pad_nan=True):
         if weights == 'weights':
             weights = self.fc.weight.detach()
             title = f'{self.__class__.__name__} weight'
