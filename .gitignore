@@ -1,15 +1,19 @@
 # Mine
+temp.py
+submit.sh
+.DS_Store
 data/
 misc/
 results/
 runs/
+lightning_logs/
 .spyproject/
 *.png
 *.pt
 *.pkl
 *.pdf
 *.gv
-
+*.pptx
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -141,6 +145,4 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-temp.py
-.DS_Store
-*.pptx
+

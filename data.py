@@ -75,7 +75,7 @@ class AssociativeDataset(Dataset):
 
 
     def perturb(self, datapoint):
-        datapoint = torch.empty_like(datapoint).copy_(datapoint) #prevent in-place modification
+        datapoint = torch.clone(datapoint) #prevent in-place modification
         mask = self.get_perturb_mask(datapoint)
         value = self.get_perturb_value(datapoint, mask)
         datapoint[mask] = value
@@ -89,7 +89,9 @@ class AssociativeDataset(Dataset):
     def __getitem__(self, index):
         target = self.data[index]
         input, perturb_mask = self.perturb(target)
-        return input, target, perturb_mask
+        if self.labels is None:
+            return input, target, perturb_mask
+        return input, target, perturb_mask, self.labels[index]
 
 
     @staticmethod
@@ -103,11 +105,10 @@ class AssociativeDataset(Dataset):
         return grid
 
 
-    def plot_batch(self, num_samples=100, inputs=None, targets=None, outputs=None, ax_rows=1, **kwargs):
+    def plot_batch(self, num_samples=100, inputs=None, targets=None, outputs=None,
+                   ax_rows=1, cbar='shared', **kwargs):
         if inputs is None and targets is None:
-            inputs, targets, _ = next(iter(
-                DataLoader(self, batch_size=num_samples, shuffle=True)
-                ))
+            inputs, targets = next(iter(DataLoader(self, batch_size=num_samples, shuffle=True)))[0:2]
 
         named_batches = {'Inputs': inputs, 'Targets': targets, 'Outputs': outputs}
         named_batches.update(**kwargs)
@@ -117,7 +118,7 @@ class AssociativeDataset(Dataset):
                 grids.append(self.batch_to_grid(batch.cpu()))
                 titles.append(title)
 
-        return plots.plot_matrices(grids, titles, ax_rows=ax_rows)
+        return plots.plot_matrices(grids, titles, ax_rows=ax_rows, cbar=cbar)
 
 
 

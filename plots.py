@@ -32,8 +32,9 @@ def plot_matrix(mat, title='', cbar=True, cmap='RdBu_r', vmin=None, vmax=None, a
 
 
 def plot_matrices(mat_list, title_list=None, ax=None,
-                  ax_rows=None, ax_cols=None, **kwargs):
+                  ax_rows=None, ax_cols=None, cbar='shared', **kwargs):
     """mat_list: a list of numpy arrays or pytorch tensors"""
+    assert cbar in ['shared', 'individual', False]
     ax_rows, ax_cols = length_to_rows_cols(len(mat_list), ax_rows, ax_cols)
     fig, ax = prep_axes(ax, ax_rows, ax_cols)
     mat_list = [prep_matrix(mat) for mat in mat_list]
@@ -41,18 +42,25 @@ def plot_matrices(mat_list, title_list=None, ax=None,
     if title_list is None:
         title_list = ['' for _ in len(mat_list)]
 
-    vmax = max([np.nanmax(np.abs(mat)) for mat in mat_list])
-    vmin = -vmax
-    cbar = kwargs.pop('cbar', True)
+    if cbar == 'shared':
+        vmax = max([np.nanmax(np.abs(mat)) for mat in mat_list])
+        vmin = -vmax
+    else:
+        vmin = vmax = None
+
     for i, (mat,title,ax_i) in enumerate(zip(mat_list, title_list, ax.flatten())):
-        if i==len(mat_list)-1:
-            plot_matrix(mat, title, ax=ax_i, vmax=vmax, vmin=vmin, cbar=cbar, **kwargs)
+        if cbar == 'shared':
+            cbar_i = True if i==len(mat_list)-1 else 'placeholder'
         else:
-            plot_matrix(mat, title, ax=ax_i, vmax=vmax, vmin=vmin, cbar='placeholder', **kwargs)
+            cbar_i = (cbar=='individual')
+
+        plot_matrix(mat, title, ax=ax_i, vmax=vmax, vmin=vmin, cbar=cbar_i, **kwargs)
+
+    fig.tight_layout()
     return fig, ax
 
 
-
+#%% old ##########################
 def plot_fixed_points(net, num_fps=100, inputs=None, drop_last=0, ax=None):
     if inputs is None:
         hidden_size, input_size = net.W.shape #[N,M]

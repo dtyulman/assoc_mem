@@ -67,20 +67,52 @@ def load_config(path):
     return config
 
 
-def initialize_savedir(baseconfig):
+def initialize_savedir(experiment, use_existing=False):
+    """
+    results/
+    | 2022-10-04/
+    | | MyExperiment_0000/
+    | | | baseconfig.txt
+    | | | var1=v1delta1_var2=v2delta1_var3=v3delta1/
+    | | | | config.txt
+    | | | | checkpoints/
+    | | | | eventa.out.tfevents.1234567890.user.local.12345.0
+    | | | | hparams.yaml
+    | | | var1=v1delta2_var2=v2delta2_var3=v3delta2/
+    | | | | ...
+    | | | var1=v1delta3_var2=v2delta3_var3=v3delta3/
+    | | | | ...
+    | | AnotherExperiment/
+    | | | ...
+    | 2022-10-21/
+    | ...
+    | 2022-12-15/
+    | ...
+    """
+    experiment_name = experiment.__class__.__name__
     root = os.path.dirname(os.path.abspath(__file__))
     ymd = datetime.date.today().strftime('%Y-%m-%d')
     saveroot = os.path.join(root, 'results', ymd)
     try:
-        prev_run_dirs = glob.glob(os.path.join(saveroot, '[0-9]*'))
+        prev_run_dirs = glob.glob(os.path.join(saveroot, f'{experiment_name}_[0-9]*'))
         prev_run_dirs = sorted([os.path.split(d)[-1] for d in prev_run_dirs])
-        run_number = int(prev_run_dirs[-1])+1
-    except (FileNotFoundError, IndexError, ValueError):
-        run_number = 0
-    savedir = os.path.join(saveroot, '{:04d}'.format(run_number))
-    os.makedirs(savedir)
-    with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
-        f.write(repr(baseconfig)+'\n')
+        latest_run_number = int(prev_run_dirs[-1][-4:])
+    except (FileNotFoundError, IndexError):
+        #IndexError from prev_run_dirs[-1] if prev_run_dirs is empty
+        lastest_run_number = 0
+
+    if use_existing:
+        savedir = os.path.join(saveroot, f'{experiment_name}_{latest_run_number:04d}')
+        #sanity check to make sure existing baseconfig matches current baseconfig
+        with open(os.path.join(savedir, 'baseconfig.txt'), 'r') as f:
+            existing_config = eval(f.read())
+            assert existing_config == experiment.baseconfig
+    else:
+        savedir = os.path.join(saveroot, f'{experiment_name}_{latest_run_number+1:04d}')
+        os.makedirs(savedir)
+        with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
+            f.write(repr(experiment.baseconfig)+'\n')
+
     print(f'Saving to: {savedir}')
     return savedir
 

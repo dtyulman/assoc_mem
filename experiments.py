@@ -16,6 +16,12 @@ train_config = cfg.Config({
     'sparse_log_factor': 5,
     })
 
+slurm_config = cfg.Config({
+    'cpus': 1,
+    'mem': 16, #GB
+    'gpus': 0,
+    'time': '0-12:00:00'
+    })
 
 # Networks #
 base_net_config = cfg.Config({
@@ -92,17 +98,74 @@ cifar_config.update({
 ###############
 # Experiments #
 ###############
-class DefaultExperiment:
+class Experiment:
+    baseconfig = None
+    deltaconfigs = {}
+    deltamode = 'combinatorial' #combinatorial or sequential
+
+    def __init__(self):
+        self.configs, self.labels = cfg.flatten_config_loop(self.baseconfig, self.deltaconfigs, self.deltamode)
+
+    def __len__(self):
+        return len(self.configs)
+
+    def __getitem__(self, idx):
+        return self.configs[idx], self.labels[idx]
+
+
+class DefaultExperiment(Experiment):
     baseconfig = cfg.Config({ #be careful with in-place ops!
         'train': deepcopy(train_config),
         'net': deepcopy(large_assoc_mem_config),
         'data': deepcopy(mnist_classify_config),
         })
-    deltaconfigs = {}
-    mode = 'combinatorial' #combinatorial or sequential
 
 
-class Associative_CIFAR10_Debug:
+class Stepsize_Onestep_Beta_Convergence(Experiment):
+    from networks import Softmax
+
+    _train_config = deepcopy(train_config)
+    _train_config.update({
+        'mode': 'bptt', #bptt, rbp, rbp-1, rbp-1h
+        'batch_size': 100,
+        'epochs': 1000,
+        'log_every': 50,
+        'sparse_log_factor': 5,
+        })
+
+    _data_config = deepcopy(mnist_config)
+    _data_config.update({
+        'select_classes': [0,1,2,3,4],
+        'n_per_class': 'all',
+        })
+
+    _net_config = deepcopy(large_assoc_mem_config)
+    _net_config.update({
+        'converged_thres': 1e-6,
+        'max_steps': 500,
+        'dt': .05,
+        'hidden_size': 100,
+        'input_nonlin': networks.Identity(),
+        'hidden_nonlin': networks.Softmax(beta=1, train=False),
+        'tau': 1.,
+        })
+
+    baseconfig = cfg.Config({
+        'train': _train_config,
+        'net': _net_config,
+        'data': _data_config,
+        'slurm': deepcopy(slurm_config)
+        })
+
+    deltaconfigs = {'net.dt': [0.1, 1],
+                    'net.max_steps': [1000, 1],
+                    'data.n_per_class': [20, 'all'],
+                    'net.hidden_nonlin': [Softmax(1), Softmax(5), Softmax(10)]
+                    }
+    deltamode = 'combinatorial'
+
+
+class Associative_CIFAR10_Debug(Experiment):
     _train_config = deepcopy(train_config)
     _train_config.update({
         'mode': 'bptt', #bptt, rbp, rbp-1, rbp-1h
@@ -135,4 +198,4 @@ class Associative_CIFAR10_Debug:
 
     deltaconfigs = {'net.kernel_size': [4,4, 8,8,8, 16,16,16,16],
                     'net.stride':      [1,4, 1,4,8,  1, 4, 8,16]}
-    mode = 'sequential'
+    deltamode = 'sequential'

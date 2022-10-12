@@ -3,70 +3,27 @@ from copy import deepcopy
 
 import torch
 import torchvision
-from torch import nn
 from torch.nn import functional as F
 import pytorch_lightning as pl
 
 import plots
-
-##################
-# Nonlinearities #
-##################
-class Softmax(nn.Softmax):
-    def __init__(self, beta=1, train=False, dim=1):
-        super().__init__(dim=dim)
-        self.beta = nn.Parameter(torch.tensor(float(beta)), requires_grad=train)
-
-    def __str(self):
-        return f'Softmax(beta={self.beta}{", train=True" if self.beta.requires_grad else ""})'
-
-    def forward(self, input):
-        return super().forward(self.beta*input)
-
-
-class Spherical(nn.Module):
-    def forward(self, input):
-        return input / torch.linalg.vector_norm(input, dim=-2, keepdim=True)
-
-
-class Identity(nn.Module):
-    def forward(self, input):
-        return input
-
-
-class Polynomial(nn.Module):
-    def __init__(self, n):
-        super().__init__()
-        self.n = nn.Parameter(torch.tensor(int(n)), requires_grad=False)
-
-    def forward(self, input):
-        return torch.pow(input, self.n)
-
-
-class RectifiedPoly(nn.Module):
-    def __init__(self, n, train=False):
-        super().__init__()
-        self.n = nn.Parameter(torch.tensor(float(n)), requires_grad=train)
-
-    def forward(self, input):
-        return torch.pow(torch.relu(input), self.n)
+import callbacks as cb
+import network_components as nc
 
 
 
-############
-# Networks #
-############
 class AssociativeMemory(pl.LightningModule):
-    def __init__(self, dt=1., converged_thres=0, max_steps=1000,
+    def __init__(self, dt=1., converged_thres=0, max_steps=100, warn_not_converged=True,
                  train_kwargs={'mode':'bptt'},
                  optimizer_kwargs={'class':'Adam'},
                  sparse_log_factor=5):
         super().__init__()
-        self.save_hyperparameters(ignore='sparse_log_factor')
+        self.save_hyperparameters(ignore=['sparse_log_factor', 'warn_not_converged'])
 
         self.dt = dt
         self.max_steps = max_steps
         self.converged_thres = converged_thres
+        self.warn_not_converged = warn_not_converged
 
         self.sparse_log_factor = sparse_log_factor
         self.setup_training_step(**train_kwargs)
@@ -79,15 +36,17 @@ class AssociativeMemory(pl.LightningModule):
         """
         state = self.default_init(*init_state)
         if debug: state_history = [state]
-        for t in range(self.max_steps):
+        for t in range(1,self.max_steps+1):
             prev_state = state
             state = self.step(*prev_state)
             if debug: state_history.append(state)
-            res = self.get_residual(state, prev_state)
-            if res <= self.converged_thres:
+            residual = self.get_residual(state, prev_state)
+            if residual <= self.converged_thres:
                 break
-        if t >= self.max_steps:
-            print(f'FP not converged: t={t}, residual={res:.1e}, thres={self.converged_thres}')
+        if residual > self.converged_thres and self.warn_not_converged:
+            print(f'FP not converged: t={t}, residual={residual:.1e}, thres={self.converged_thres}')
+
+        self.log('steps_to_converge', t)
 
         if debug:
             return state_history
@@ -136,7 +95,7 @@ class AssociativeMemory(pl.LightningModule):
 
 
     def configure_callbacks(self):
-        return [ParamsLogger(), OutputsLogger(self.sparse_log_factor)]
+        return [cb.ParamsLogger(), cb.OutputsLogger(self.sparse_log_factor)]
 
 
     @staticmethod
@@ -154,10 +113,10 @@ class AssociativeMemory(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        input, target, perturb_mask = batch
-        output = self.training_forward(input)
+        input, target = batch[0:2]
         if isinstance(target, torch.Tensor):
             target = (target,) #output is tuple, make sure target is too
+        output = self.training_forward(input)
         loss = self.loss_fn(output, target)
         acc = self.acc_fn(output, target)
 
@@ -206,13 +165,13 @@ class AssociativeMemory(pl.LightningModule):
                 fp_out,_ = pack(*self.step(*unpack(fp_in,unpacked_shape)))
                 def backward_hook(grad):
                     new_grad = grad
-                    for t in range(self.rbp_max_steps):
+                    for t in range(1,self.rbp_max_steps+1):
                         new_grad_prev = new_grad
                         new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)[0] + grad
                         rel_res = ((new_grad - new_grad_prev).norm()/new_grad.norm()).item()
                         if rel_res <= self.rbp_converged_thres:
                             break
-                    if t >= self.rbp_max_steps-1:
+                    if t > self.rbp_max_steps:
                         print(f'BP not converged: t={t}, res={rel_res}')
                     return new_grad
                 fp.register_hook(backward_hook)
@@ -228,9 +187,6 @@ class AssociativeMemory(pl.LightningModule):
 
 
 
-
-
-
 class LargeAssociativeMemory(AssociativeMemory):
     """From Krotov and Hopfield 2020
     x: [B,N] (feature)
@@ -239,18 +195,20 @@ class LargeAssociativeMemory(AssociativeMemory):
     def __init__(self,
                  input_size,
                  hidden_size,
-                 input_nonlin = lambda x: x,
-                 hidden_nonlin = Softmax(),
+                 input_nonlin = nc.Identity(),
+                 hidden_nonlin = nc.Softmax(),
                  tau = 1,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.feature = Layer(input_size, nonlin=input_nonlin, tau=float(tau), dt=self.dt)
-        self.fc = Linear(input_size, hidden_size)
-        self.hidden = Layer(hidden_size, nonlin=hidden_nonlin, tau=0, dt=self.dt)
+        self.save_hyperparameters()
+
+        self.feature = nc.Layer(input_size, nonlin=input_nonlin, tau=float(tau), dt=self.dt)
+        self.fc = nc.Linear(input_size, hidden_size)
+        self.hidden = nc.Layer(hidden_size, nonlin=hidden_nonlin, tau=0, dt=self.dt)
 
 
     def configure_callbacks(self):
-        return super().configure_callbacks() + [WeightsLogger(self.sparse_log_factor)]
+        return super().configure_callbacks() + [cb.WeightsLogger(self.sparse_log_factor)]
 
 
     def step(self, x_prev):
@@ -291,12 +249,12 @@ class ConvThreeLayer(AssociativeMemory):
                  dt=0.1, *args, **kwargs):
         super().__init__(dt=dt, *args, **kwargs)
         y_size = math.floor((x_size-kernel_size)/stride)+1
-        self.x = Layer(x_channels, x_size, x_size, dt=self.dt, tau=1)
-        self.y = Layer(y_channels, y_size, y_size, nonlin=Softmax(beta=0.1), dt=self.dt, tau=0.2)
-        self.z = Layer(z_size, nonlin=Softmax(), dt=self.dt, tau=0)
+        self.x = nc.Layer(x_channels, x_size, x_size, dt=self.dt, tau=1)
+        self.y = nc.Layer(y_channels, y_size, y_size, nonlin=nc.Softmax(beta=0.1), dt=self.dt, tau=0.2)
+        self.z = nc.Layer(z_size, nonlin=nc.Softmax(), dt=self.dt, tau=0)
 
-        self.conv = Conv2d(x_channels, y_channels, kernel_size, stride)
-        self.fcr = Reshape(Linear(math.prod(self.y.shape), z_size),
+        self.conv = nc.Conv2d(x_channels, y_channels, kernel_size, stride)
+        self.fcr = nc.Reshape(nc.Linear(math.prod(self.y.shape), z_size),
                            (math.prod(self.y.shape),))
 
 
@@ -307,7 +265,7 @@ class ConvThreeLayer(AssociativeMemory):
 
 
     def configure_callbacks(self):
-        return super().configure_callbacks() + [WeightsLogger(self.sparse_log_factor)]
+        return super().configure_callbacks() + [cb.WeightsLogger(self.sparse_log_factor)]
 
 
     def step(self, x_prev, y_prev):
@@ -359,170 +317,6 @@ class Hierarchical(AssociativeMemory):
             raise NotImplementedError() #TODO
 
 
-#########
-# Layer #
-#########
-class Layer(nn.Module):
-    def __init__(self, *shape, nonlin=lambda x:x, tau=1, dt=1):
-        super().__init__()
-
-        self.shape = shape
-        self.nonlin = nonlin
-
-        assert dt<=tau or tau==0
-        self.tau = float(tau)
-        self.dt = float(dt)
-        self.eta = dt/tau if tau!=0 else 1.
-
-    def default_init(self, batch_size, mode='zeros'):
-        if mode == 'zeros':
-            return torch.zeros(batch_size, *self.shape)
-        else:
-            raise ValueError(f'Invalid initialization mode: {mode}')
-
-    def step(self, prev_state, total_input):
-        steady_state = self.nonlin(total_input)
-        state = (1-self.eta)*prev_state + self.eta*steady_state
-        return state
-
-
-#################################
-# Transposeable transformations #
-#################################
-class Linear(nn.Module):
-#Want to do this but does not work to share weights...
-#class Linear(nn.Linear):
-#    def __init__(self, input_size, output_size):
-#        super().__init__(input_size, output_size, bias=False)
-#        self.T = nn.Linear(self.out_features, self.in_features, bias=False)
-#        self.T.weight.data = self.weight.data.t() #how to share weights correctly?
-    def __init__(self, input_size, output_size):
-        super().__init__()
-        self.input_size = input_size
-        self.output_size = output_size
-        self.weight = nn.Parameter(torch.empty(output_size, input_size))
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5)) #same as nn.Linear
-
-    def forward(self, input):
-        return F.linear(input, self.weight)
-
-    def T(self, input):
-        return F.linear(input, self.weight.t())
-
-
-class Conv2d(nn.Conv2d):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1):
-        super().__init__(in_channels, out_channels, kernel_size, stride=stride, bias=False)
-        self.T = nn.ConvTranspose2d(self.out_channels, self.in_channels, self.kernel_size, self.stride, bias=False)
-        self.T.weight = self.weight
-
-
-class AvgPool2d(nn.AvgPool2d):
-    pass #TODO
-
-
-class Reshape(nn.Module):
-    def __init__(self, function, new_shape):
-        """
-        function: a transposeable transformation
-        new_shape: must be the shape that <function> accepts, excluding the batch dimension"""
-        super().__init__()
-        self.function = function
-        self.new_shape = new_shape
-        self.old_shape = None #dynamically computed during forward
-
-    def forward(self, input):
-        """Reshapes feedforward input to new_shape before putting it through the function"""
-        self.old_shape = input.shape
-        batch_size = input.shape[0]
-        input = input.reshape(batch_size, *self.new_shape)
-        return self.function(input)
-
-    def T(self, input):
-        """Puts the feedback input through the function and reshapes it to what it
-        was before the feedforward reshaping"""
-        output = self.function.T(input)
-        return output.reshape(*self.old_shape)
-
-
-#############
-# Callbacks #
-#############
-class Printer(pl.callbacks.Callback):
-    def __init__(self, print_every=None):
-        """
-        print_every: int or None. If None, defaults to trainer.log_every_n_steps
-        """
-        self.print_every = print_every
-
-    def setup(self, trainer, module, stage=None):
-        if self.print_every is None:
-            self.print_every = trainer.log_every_n_steps
-
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        if trainer.global_step % self.print_every == 0:
-            it = trainer.global_step
-            ep = trainer.current_epoch
-            loss = trainer.callback_metrics['train/loss'].item()
-            acc = trainer.callback_metrics['train/acc'].item()
-            print(f'it={it}, ep={ep}, bx={batch_idx}, loss={loss:.4e}, acc={acc}')
-
-
-class ParamsLogger(pl.callbacks.Callback):
-    def on_after_backward(self, trainer, module):
-        for name, param in module.named_parameters():
-            if param.numel() > 1:
-                module.log(f'params/{name} (mean)', param.mean().item())
-                module.log(f'params/{name} (std)', param.std().item())
-            else:
-                module.log(f'params/{name}', param.item())
-
-            if param.requires_grad:
-                if param.numel() > 1:
-                    module.log(f'grads/{name} (mean)', param.grad.mean().item())
-                    module.log(f'grads/{name} (std)', param.grad.std().item())
-                else:
-                    module.log(f'grads/{name}', param.grad.item())
-
-
-class SparseLogger(pl.callbacks.Callback):
-    def __init__(self, sparse_log_factor=5):
-        self.sparse_log_factor = sparse_log_factor
-
-    def setup(self, trainer, module, stage=None):
-        self.sparse_log_every = trainer.log_every_n_steps*self.sparse_log_factor
-
-
-class WeightsLogger(SparseLogger):
-    """requires module.plot_weights(weights:['weights'|'grad'])->(fig,*)
-    """
-    def on_after_backward(self, trainer, module):
-        if (trainer.global_step+1) % self.sparse_log_every == 0:
-            with plots.NonInteractiveContext():
-                fig = module.plot_weights()[0]
-                trainer.logger.experiment.add_figure('params/weight', fig,
-                                                     global_step=trainer.global_step)
-
-                fig = module.plot_weights(weights='grads')[0]
-                trainer.logger.experiment.add_figure('grad/weight', fig,
-                                                     global_step=trainer.global_step)
-
-
-class OutputsLogger(SparseLogger):
-    """requires train_data.plot_batch(input,target,output)->(fig,*)
-    and module.training_step(...)->{'output':module(input),*}
-    """
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):
-        if (trainer.global_step+1) % self.sparse_log_every == 0:
-            input, target, perturb_mask = batch
-            with plots.NonInteractiveContext():
-                #TODO: this hard-codes the zeroth item of the final fixed point
-                #state tuple as the output. In general might be any/some/all of
-                #the entries in the state tuple
-                fig = trainer.train_dataloader.dataset.datasets \
-                        .plot_batch(input, target, outputs['output'][0])[0]
-            trainer.logger.experiment.add_figure('sample_batch', fig,
-                                                 global_step=trainer.global_step)
 
 ###############
 # Simple test #
@@ -555,7 +349,7 @@ if __name__ == '__main__':
     def train(net, train_data):
         train_loader = DataLoader(train_data, batch_size=len(train_data), shuffle=False)
         timer = pl.callbacks.Timer()
-        printer = Printer()
+        printer = cb.Printer()
         print(f'\nStarting {net.__class__.__name__} ({net.train_mode})')
         trainer = pl.Trainer(max_steps=1,
                              logger=False,
