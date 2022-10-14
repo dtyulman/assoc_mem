@@ -79,15 +79,10 @@ def initialize_savedir(experiment, use_existing=False):
     | | | | eventa.out.tfevents.1234567890.user.local.12345.0
     | | | | hparams.yaml
     | | | var1=v1delta2_var2=v2delta2_var3=v3delta2/
-    | | | | ...
     | | | var1=v1delta3_var2=v2delta3_var3=v3delta3/
-    | | | | ...
-    | | AnotherExperiment/
-    | | | ...
+    | | MyExperiment_0001/
+    | | AnotherExperiment_0000/
     | 2022-10-21/
-    | ...
-    | 2022-12-15/
-    | ...
     """
     experiment_name = experiment.__class__.__name__
     root = os.path.dirname(os.path.abspath(__file__))
@@ -99,19 +94,21 @@ def initialize_savedir(experiment, use_existing=False):
         latest_run_number = int(prev_run_dirs[-1][-4:])
     except (FileNotFoundError, IndexError):
         #IndexError from prev_run_dirs[-1] if prev_run_dirs is empty
-        lastest_run_number = 0
+        latest_run_number = -1
+        if use_existing:
+            raise ValueError("No existing experiments found")
 
     if use_existing:
         savedir = os.path.join(saveroot, f'{experiment_name}_{latest_run_number:04d}')
         #sanity check to make sure existing baseconfig matches current baseconfig
         with open(os.path.join(savedir, 'baseconfig.txt'), 'r') as f:
-            existing_config = eval(f.read())
-            assert existing_config == experiment.baseconfig
+            existing_config = f.read()
+            assert existing_config == str(experiment.baseconfig)
     else:
         savedir = os.path.join(saveroot, f'{experiment_name}_{latest_run_number+1:04d}')
         os.makedirs(savedir)
         with open(os.path.join(savedir, 'baseconfig.txt'), 'w') as f:
-            f.write(repr(experiment.baseconfig)+'\n')
+            f.write(repr(experiment.baseconfig))
 
     print(f'Saving to: {savedir}')
     return savedir

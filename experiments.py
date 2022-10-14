@@ -1,5 +1,5 @@
 from copy import deepcopy
-import networks
+import network_components as nc
 import configs as cfg
 
 ####################
@@ -14,6 +14,7 @@ train_config = cfg.Config({
     'save_logs': True,
     'log_every': 10,
     'sparse_log_factor': 5,
+    # 'trainer_kwargs': cfg.Config({}) #any kwargs passed to pl.Trainer()
     })
 
 slurm_config = cfg.Config({
@@ -39,8 +40,8 @@ large_assoc_mem_config.update({
     'class': 'LargeAssociativeMemory',
     'input_size': None, #if None, infer from dataset
     'hidden_size': 25,
-    'input_nonlin': networks.Identity(),
-    'hidden_nonlin': networks.Softmax(beta=5, train=False),
+    'input_nonlin': nc.Identity(),
+    'hidden_nonlin': nc.Softmax(beta=5, train=False),
     'tau': 1.,
     })
 
@@ -122,11 +123,10 @@ class DefaultExperiment(Experiment):
 
 
 class Stepsize_Onestep_Beta_Convergence(Experiment):
-    from networks import Softmax
+    from network_components import Softmax
 
     _train_config = deepcopy(train_config)
     _train_config.update({
-        'mode': 'bptt', #bptt, rbp, rbp-1, rbp-1h
         'batch_size': 100,
         'epochs': 1000,
         'log_every': 50,
@@ -145,8 +145,7 @@ class Stepsize_Onestep_Beta_Convergence(Experiment):
         'max_steps': 500,
         'dt': .05,
         'hidden_size': 100,
-        'input_nonlin': networks.Identity(),
-        'hidden_nonlin': networks.Softmax(beta=1, train=False),
+        'hidden_nonlin': nc.Softmax(beta=1, train=False),
         'tau': 1.,
         })
 

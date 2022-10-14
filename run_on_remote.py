@@ -33,10 +33,8 @@ submit_sh = f"""#!/bin/sh
 #SBATCH --job-name={expt.__class__.__name__}
 #SBATCH --output=slurm/slurm_%x_%a_%A.out
 
-[ ! -d slurm ] && mkdir slurm
-echo Running experiment {expt.__class__.__name__}, trial $SLURM_ARRAY_TASK_ID
-conda init bash
-conda activate torch
+[[ ! -d slurm ]] && mkdir slurm
+echo Queueing experiment {expt.__class__.__name__}, trial $SLURM_ARRAY_TASK_ID
 srun python main.py -e {expt.__class__.__name__} -t $SLURM_ARRAY_TASK_ID
 """
 #TODO: '#SBATCH --gpus-per-task={gpus}' doesn't work https://confluence.columbia.edu/confluence/display/rcs/Ginsburg+-+Job+Examples#GinsburgJobExamples-GPU(CUDAC/C++)
