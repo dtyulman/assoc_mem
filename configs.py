@@ -8,7 +8,7 @@ class Config(MutableMapping):
     """Nested dictionary that can be accessed by dot-separated keys
     e.g. cfg['a.b.c'] == cfg['a']['b']['c']"""
     #alternative: https://stackoverflow.com/questions/3387691/how-to-perfectly-override-a-dict/39375731#39375731
-    #TODO: consider making immutable (replace set/delitem() with updated() method which returns a
+    #TODO: make immutable (eg. replace set/delitem() with updated() method which returns a
     #copy with corresponding key added/removed/modified and change _storage to namedtuple)
     def __init__(self, input_dict):
         self._storage = {}
@@ -118,9 +118,8 @@ def flatten_config_loop(baseconfig, deltaconfigs, mode='combinatorial'):
     """With baseconfig as the default, return a list of configs with the entries in deltaconfigs.keys()
     looped over the corresponding lists in deltaconfigs.values()"""
 
-    assert all([param in baseconfig for param in deltaconfigs]), \
-        'Varied parameters must exist in baseconfig'
-
+    for param in deltaconfigs:
+        assert param in baseconfig, f'deltaconfigs[{param}] does not exist in baseconfig'
 
     values_unzipped = [()]
     if len(deltaconfigs) > 0:

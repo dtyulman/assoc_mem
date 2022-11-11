@@ -2,9 +2,7 @@ from pytorch_lightning import Callback
 
 import plots
 
-#############
-# Callbacks #
-#############
+
 class Printer(Callback):
     def __init__(self, print_every=None):
         """
@@ -29,22 +27,25 @@ class Printer(Callback):
 
 
 class ParamsLogger(Callback):
-    def on_after_backward(self, trainer, module):
-        for name, param in module.named_parameters():
+    def on_before_optimizer_step(self, trainer, module, optimizer, opt_idx):
+        for name, param in module.state_dict().items(): #includes buffers
+            group = '_params' if name.split('.')[-1].startswith('_') else 'params'
             if param.numel() > 1:
-                module.log(f'params/{name} (norm)', param.norm().item())
-                module.log(f'params/{name} (mean)', param.mean().item())
-                module.log(f'params/{name} (var)', param.var().item())
+                module.log(f'{group}/{name} (norm)', param.norm().item())
+                module.log(f'{group}/{name} (mean)', param.mean().item())
+                module.log(f'{group}/{name} (var)', param.var().item())
             else:
-                module.log(f'params/{name}', param.item())
+                module.log(f'{group}/{name}', param.item())
 
+        for name, param in module.named_parameters():
             if param.requires_grad:
+                group = '_grads' if name.split('.')[-1].startswith('_') else 'grads'
                 if param.numel() > 1:
-                    module.log(f'grads/{name} (norm)', param.grad.norm().item())
-                    module.log(f'grads/{name} (mean)', param.grad.mean().item())
-                    module.log(f'grads/{name} (var)', param.grad.var().item())
+                    module.log(f'{group}/{name} (norm)', param.grad.norm().item())
+                    module.log(f'{group}/{name} (mean)', param.grad.mean().item())
+                    module.log(f'{group}/{name} (var)', param.grad.var().item())
                 else:
-                    module.log(f'grads/{name}', param.grad.item())
+                    module.log(f'{group}/{name}', param.grad.item())
 
 
 class SparseLogger(Callback):
@@ -58,7 +59,7 @@ class SparseLogger(Callback):
 class WeightsLogger(SparseLogger):
     """requires module.plot_weights(weights:['weights'|'grad'])->(fig,*)
     """
-    def on_after_backward(self, trainer, module):
+    def on_before_optimizer_step(self, trainer, module, optimizer, opt_idx):
         if (trainer.global_step+1) % self.sparse_log_every == 0:
             with plots.NonInteractiveContext():
                 fig = module.plot_weights()[0]
@@ -66,7 +67,7 @@ class WeightsLogger(SparseLogger):
                                                      global_step=trainer.global_step)
 
                 fig = module.plot_weights(weights='grads')[0]
-                trainer.logger.experiment.add_figure('grad/weight', fig,
+                trainer.logger.experiment.add_figure('grads/weight', fig,
                                                      global_step=trainer.global_step)
 
 
@@ -78,8 +79,7 @@ class OutputsLogger(SparseLogger):
         if (trainer.global_step+1) % self.sparse_log_every == 0:
             input, target = batch[0], batch[1]
             with plots.NonInteractiveContext():
-                #TODO: this hard-codes the zeroth item of the final fixed point
-                #state tuple as the output. In general might be any/some/all of
+                #TODO: this assumes state[0] is the "output". In general might be any/some/all of
                 #the entries in the state tuple
                 fig, ax = trainer.train_dataloader.dataset.datasets \
                             .plot_batch(inputs=input, targets=target, outputs=outputs['output'][0])

@@ -219,7 +219,7 @@ class AssociativeClassifyMNIST(AssociativeMNIST):
     def concatenate(self, data, labels, normalize=False):
         num_classes = len(labels.unique())
         targets = F.one_hot(labels, num_classes=num_classes)
-        data = torch.cat((data,targets))
+        data = torch.cat((data,targets), dim=1)
         if normalize:
             data = data/data.norm(dim=1, keepdim=True)
         return data
@@ -301,10 +301,12 @@ class AssociativeCIFAR10(AssociativeDataset):
         return grid
 
 
-
+###########
+# Helpers #
+###########
 def filter_by_class(data, labels, num_samples=None, select_classes='all', n_per_class='all', sort_by_class=True):
     if num_samples is not None:
-        raise Exception("This probably doesn't work the way you are expecting.") #TODO
+        raise Exception("This probably doesn't work the way you are expecting.") #TODO: fix
         data = data[:num_samples]
         labels = labels[:num_samples]
 
@@ -334,14 +336,12 @@ def filter_by_class(data, labels, num_samples=None, select_classes='all', n_per_
     return data[selected_idx], labels[selected_idx]
 
 
-
-def get_data(**kwargs):
-    DatasetClass = globals()[kwargs.pop('class')]
-    include_test = kwargs.pop('include_test', False)
+def get_data(include_test=False, **kwargs):
+    DatasetClass = kwargs.pop('class')
 
     train_data = DatasetClass(**kwargs)
-    test_data = None
 
+    test_data = None
     if include_test:
         if DatasetClass == AssociativeRandom:
             test_data = DatasetClass(**kwargs)
@@ -351,7 +351,9 @@ def get_data(**kwargs):
     return train_data, test_data
 
 
-
+#############
+# Visualize #
+#############
 if __name__ == '__main__':
     data = AssociativeMNIST()
     data.plot_batch(num_samples=4)
