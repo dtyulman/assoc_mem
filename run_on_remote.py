@@ -9,7 +9,7 @@ REMOTE_SYNC_SERVER = 'dt2586@motion.rcs.columbia.edu'
 REMOTE_PATH = '/burg/theory/users/dt2586/assoc_mem' #'/burg/home/dt2586/assoc_mem' #
 
 #%%select experiment and trials
-experiment = experiments.AssociativeMNIST_Exceptions_TwoBeta()
+experiment = experiments.AssociativeMNIST_Exceptions()
 trials = f'1-{len(experiment)}' #default, all trials
 
 #%%generate submit.sh file
@@ -32,8 +32,12 @@ submit_sh = f"""#!/bin/sh
 echo Queueing experiment {experiment.__class__.__name__}, trial $SLURM_ARRAY_TASK_ID
 srun python -u main.py -e {experiment.__class__.__name__} -t $SLURM_ARRAY_TASK_ID
 """
+#TODO: `mkdir slurm` doesn't work, had make it manually instead. Would actually be better to
+# store the output logs under results/<yyyy-mm-dd>/<experiment_name>/<trial_label> but that folder
+# isn't created until after main.py is executed, but needs to already exist before
+# `sbatch submit.sh` is executed (this is also probably why `mkdir slurm` doesn't work)
 #TODO: test this: '#SBATCH --signal=SIGUSR1@90'
-#TODO: '#SBATCH --gpus-per-task={gpus}' doesn't work https://confluence.columbia.edu/confluence/display/rcs/Ginsburg+-+Job+Examples#GinsburgJobExamples-GPU(CUDAC/C++)
+#TODO: '#SBATCH --gpus-per-task={gpus}' doesn't work, see https://confluence.columbia.edu/confluence/display/rcs/Ginsburg+-+Job+Examples#GinsburgJobExamples-GPU(CUDAC/C++)
 #TODO: use --cpus-per-gpu for gpu?
 
 with open('submit.sh', 'w') as f:

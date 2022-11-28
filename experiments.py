@@ -46,7 +46,7 @@ large_assoc_mem_config.update({
     'hidden_size': 25,
     'input_nonlin': nc.Identity(),
     'hidden_nonlin': nc.Softmax(beta=1, train=True),
-    'rescale_grads': False,
+    'rescale_grads': False, #True, False
     'normalize_weights': False,
     'tau': 1.,
     })
@@ -60,7 +60,9 @@ exceptions_mhn_config.update({
     'beta_exception': None, #if None, will use same beta for all inputs
     'train_beta': True,
     'exceptions': None,
-    'exception_loss_scaling': 1 #int, 'linear_data'
+    'exception_loss_scaling': 1, #int, 'linear_data'
+    'rescale_grads': False, #True, False, 'unweighted_loss'
+
 })
 
 conv_net_config = deepcopy(base_net_config)
@@ -180,9 +182,9 @@ class AssociativeMNIST_Exceptions(Experiment):
         'data': _data_config,
         })
 
-    deltaconfigs = {'net.beta': [0.1, 1, 10],
+    deltaconfigs = {'net.beta': [1, 10],
                     'net.train_beta': [False, True],
-                    'net.rescale_grads': [False, True],
+                    'net.rescale_grads': ['unweighted_loss'], #[True, False]
                     'net.exception_loss_scaling': [2000, 100, 10, 1],
                     }
 

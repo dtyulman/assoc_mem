@@ -221,13 +221,18 @@ class LargeAssociativeMemory(AssociativeMemory):
         self.rescale_grads = rescale_grads
 
 
+    def _compute_grad_scaling(self):
+        """Must be called after backward()"""
+        return self.fc._weight.grad.abs().max(dim=1, keepdim=True)[0] #weight.shape = [hidden_size, input_size]
+
+
     def on_after_backward(self):
         """Optionally rescales gradient of each hidden unit's weights s.t. the max grad (across
         all afferent weights for that neuron) is equal to 1"""
         #TODO: can we move this to self.fc's class to make more general?
         if self.rescale_grads:
             #weight.shape = [hidden_size, input_size]
-            self.fc._weight.grad /= self.fc._weight.grad.abs().max(dim=1, keepdim=True)[0]
+            self.fc._weight.grad /= self._compute_grad_scaling()
 
 
     def step(self, x_prev):
@@ -294,21 +299,24 @@ class LargeAssociativeMemory(AssociativeMemory):
 
 class ExceptionsMHN(LargeAssociativeMemory):
     def __init__(self, exceptions, beta=1, beta_exception=None, train_beta=True,
-                 exception_loss_scaling=1,
-                  *args, **kwargs):
+                 exception_loss_scaling=1, *args, **kwargs):
         """
         exception_loss_scaling: Loss weighting for exceptions is `exception_loss_scaling` times
             [loss for non-exceptions]. ALl loss weightings are normalized such that they sum to 1.
             Remember to run net.set_exception_loss_scaling() after initializing the network!
         """
+        assert not train_beta or beta_exception is None, "Can't use dynamic beta if training beta0"
+        super().__init__(*args, hidden_nonlin=nc.Softmax(beta=beta, train=train_beta), **kwargs)
+
+        self.beta_exception = torch.tensor(float(beta_exception)) if beta_exception is not None else None
+
         self.exceptions = set(exceptions)
         self.exception_loss_scaling = exception_loss_scaling
         #remember to run net.set_exception_loss_scaling() after initializing the network!
 
+        self.automatic_optimization = False #must be set *after* calling super().__init__()
 
-        self.beta_exception = torch.tensor(float(beta_exception)) if beta_exception is not None else None
-        assert not train_beta or beta_exception is None, "Can't use dynamic beta if training beta0"
-        super().__init__(*args, hidden_nonlin=nc.Softmax(beta=beta, train=train_beta), **kwargs)
+
 
 
     def set_exception_loss_scaling(self, train_data):
@@ -363,12 +371,26 @@ class ExceptionsMHN(LargeAssociativeMemory):
                                                  global_step=self.trainer.global_step)
 
 
+    def on_after_backward(self):
+        """Override parent class which rescales grads in this method. Make it a passthrough since
+        we're rescaling grads inside training_step for additional flexibility wrt exceptions"""
+        pass
+
 
     def training_step(self, batch, batch_idx):
+        """Using manual optimization so that I can rescale gradients flexibly (other modules use automatic)"""
         input, target, perturb_mask, label = batch
         if isinstance(target, torch.Tensor):
             target = (target,) #output is tuple, make sure target is too
         output = self.training_forward(input, clamp_mask=~perturb_mask)
+
+        opt = self.optimizers()
+        #compute gradients without weighting and store them for use in rescaling
+        if self.rescale_grads == 'unweighted_loss':
+            opt.zero_grad()
+            unweighted_loss = self.loss_fn(output, target)
+            self.manual_backward(unweighted_loss, retain_graph=True)
+            unweighted_grad_scaling = self._compute_grad_scaling()
 
         #optionally re-run network with different beta for exceptions
         is_exception = torch.tensor([l.item() in self.exceptions for l in label])
@@ -378,25 +400,47 @@ class ExceptionsMHN(LargeAssociativeMemory):
                 output[0][is_exception] = self.training_forward(
                     input[is_exception], clamp_mask=~perturb_mask[is_exception])[0]
 
-        loss = self.loss_fn(output, target, is_exception)
+        #manually compute gradients, optionally rescale, and step the optimizer
+        #TODO: don't re-run this if there are no exceptions in the batch, since unweighted_loss
+        #is same as loss (and the same as loss_reg)
+        opt.zero_grad()
+        loss, loss_reg, loss_exc = self.loss_fn_exceptions(output, target, is_exception)
+        self.manual_backward(loss)
+        if self.rescale_grads == 'unweighted_loss':
+            self.fc._weight.grad /= unweighted_grad_scaling
+        elif self.rescale_grads is True:
+            self.fc._weight.grad /= self._compute_grad_scaling()
+        elif self.rescale_grads is not False:
+            raise ValueError()
+        opt.step()
+
         acc = self.acc_fn(output, target)
 
         self.log('train/loss', loss.item())
+        if loss_reg is not None and loss_exc is not None:
+            self.log('train/loss_exception', loss_exc.item())
+            self.log('train/loss_regular', loss_reg.item())
+
         self.log('train/acc', acc.item())
 
-        return {'loss': loss,
-                'output': tuple(o.detach() for o in output)}
+        return {'output': tuple(o.detach() for o in output)}
 
 
-    def loss_fn(self, output, target, is_exception):
+    def loss_fn_exceptions(self, output, target, is_exception):
         output, target = output[0], target[0] #unpack length-1 state tuple
 
-        weights = torch.ones(output.shape[0], 1)
+        weights = torch.ones(output.shape[0])
         weights[is_exception] = self.exception_loss_scaling
         weights = weights/sum(weights)
 
-        loss = (weights*F.mse_loss(output, target, reduction='none')).sum()
-        return loss
+        loss_per_item = F.mse_loss(output, target, reduction='none').mean(1)
+        loss_exc = loss_reg = None
+        if is_exception.any():
+            loss_exc = loss_per_item[is_exception].mean()
+            loss_reg = loss_per_item[~is_exception].mean()
+        loss = (weights*loss_per_item).sum()
+
+        return loss, loss_reg, loss_exc
 
 
 class ConvThreeLayer(AssociativeMemory):
