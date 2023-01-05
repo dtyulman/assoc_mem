@@ -5,6 +5,7 @@ import torch
 import torchvision
 from torch.nn import functional as F
 import pytorch_lightning as pl
+import matplotlib.pyplot as plt
 
 import plots
 import callbacks as cb
@@ -30,50 +31,96 @@ class AssociativeMemory(pl.LightningModule):
         self.sparse_log_factor = sparse_log_factor
         self.setup_training_step(**train_kwargs)
 
+        #TODO: specify visible=True/False in the Layer object and auto register it to this list
+        self.visible_layers = [0] #by default assume the 0th entry of state tuple is the input/output layer
+        self.state_shape = None #excludes batch dimension, gets set by self.pack()
 
-    def forward(self, *init_state, clamp_mask=None, debug=False):
+
+    def forward(self, *init_state, clamp_mask=None, return_mode=''):
         """
         init_state: list of initial states for each layer in network. Set list entry
-            to None to use the layer's default. At least one entry must be provided.
+            to None to use the Layer default. At least one entry must be provided.
         clamp_mask: same shape as init_state[0], selects which entries of the state to clamp
+        return_mode: list of options to return, can include all/any
+            'trajectory': returns entire trajectory of the state evolution from init to fixed-point
+            'converge_time': returns iteration at which each item in the batch converged
         """
         state = self.default_init(*init_state)
-        if 'clamp' in self.input_mode:
+        if 'clamp' in self.input_mode and clamp_mask is not None:
             #TODO: this assumes state[0] is the (perturbed) "input". In general might be
             # any/some/all of the entries in the state tuple
             clamp_values = state[0][clamp_mask]
 
-        if debug: state_history = [state]
+        if 'trajectory' in return_mode:
+            state_trajectory = [state]
+        if 'converge_time' in return_mode:
+            converge_time = torch.ones(state[0].shape[0])*self.max_steps+1
         for t in range(1,self.max_steps+1):
             prev_state = state
             state = self.step(*prev_state)
-            if 'clamp' in self.input_mode: #TODO: same as above
-                state[0][clamp_mask] = clamp_values
-            if debug: state_history.append(state)
-            residual = self.get_residual(state, prev_state)
+            if 'clamp' in self.input_mode and clamp_mask is not None:
+                state[0][clamp_mask] = clamp_values #TODO: same as above
+
+            if 'trajectory' in return_mode:
+                state_trajectory.append(state)
+            if 'converge_time' in return_mode:
+                residual_per_item = self.get_residual(state, prev_state, batch_avg=False)
+                converge_time[(converge_time==self.max_steps+1) & (residual_per_item<=self.converged_thres)] = t
+
+            if 'converge_time' in return_mode:
+                residual = residual_per_item.max()
+            else:
+                residual = self.get_residual(state, prev_state)
             if residual <= self.converged_thres:
                 break
+
+        self.log('steps_to_converge', t)
         if residual > self.converged_thres and self.warn_not_converged:
             print(f'FP not converged: t={t}, residual={residual:.1e}, thres={self.converged_thres}')
 
-        self.log('steps_to_converge', t)
-
-        if debug:
-            return state_history
-        return state
+        ret = state_trajectory if 'trajectory' in return_mode else state
+        ret = (ret, converge_time) if 'converge_time' in return_mode else ret
+        return ret
 
 
-    @staticmethod
-    def flatten(state):
-        return torch.cat([s.flatten() for s in state])
+    def pack(self, state, layers='all'):
+        """Returns a flattened version the state tuple, e.g. ([B,M],[B,N])->[B,M+N].
+        Specify layers as list of indices to select which layers to pack or 'visible' to pack all
+            visible layers. e.g. layers=[0] or layers='visible' gives ([B,M],[B,N])->[B,M]
+        """
+        self.state_shape = [s.shape[1:] for s in state]
+        if layers == 'all':
+            layers = range(len(state))
+        elif layers == 'visible':
+            layers = self.visible_layers
+        return torch.cat([state[i].flatten(start_dim=1) for i in layers], dim=1) #[B,V]
 
 
-    @staticmethod
-    def get_residual(state, prev_state):
+    def unpack(self, packed_state):
+        """Undoes the pack(state, layers='all') operation. Only works if the entire state was packed."""
+        batch_size = packed_state.shape[0]
+        i = 0
+        unpacked = []
+        for shape in self.state_shape:
+            j = i+math.prod(shape)
+            unpacked.append(packed_state[:,i:j].reshape(batch_size, *shape))
+            i = j
+        return unpacked
+
+
+    def get_residual(self, state, prev_state, batch_avg=True):
+        """ Computes the relative residual over the visible neurons
+        state, prev_state: tuple of tensors where i-th entry is tensor of activations from layer i
+            eg. ([B,M],[B,N]) for LargeAssocMem or ([B,Cx,L,L],[B,Cy,M,M],[B,N]) for ConvThreeLayer
+        batch_avg: if True computes scalar residual over entire batch. Otherwise, returns length-B
+            tensor with residuals for each element in the batch
+        """
         with torch.no_grad():
-            state = AssociativeMemory.flatten(state)
-            prev_state = AssociativeMemory.flatten(prev_state)
-            return ((state - prev_state).norm()/state.norm()).item()
+            state = self.pack(state, layers='visible')
+            prev_state = self.pack(prev_state, layers='visible')
+            if batch_avg:
+                return ((state - prev_state).norm()/state.norm()).item()
+            return (state - prev_state).norm(dim=1)/state.norm(dim=1)
 
 
     def default_init(self, *init_state):
@@ -140,52 +187,34 @@ class AssociativeMemory(pl.LightningModule):
     def setup_training_step(self, mode, **kwargs):
         self.train_mode = mode
         if mode == 'bptt':
-            def training_forward(self, input, clamp_mask=None):
-                return self(input, clamp_mask=clamp_mask)
+            def training_forward(self, input, clamp_mask=None, return_mode=''):
+                return self(input, clamp_mask=clamp_mask, return_mode=return_mode)
 
         elif mode == 'rbp':
             self.rbp_max_steps = kwargs.pop('max_steps', 5000)
             self.rbp_converged_thres = kwargs.pop('converged_thres', 1e-6)
-            def pack(*state):
-                if len(state)==1:
-                    return state[0], None
-                batch_size = state[0].shape[0]
-                unpacked_shape = [s.shape[1:] for s in state]
-                packed_state = torch.cat([s.reshape(batch_size,-1) for s in state], dim=1)
-                return packed_state, unpacked_shape
-
-            def unpack(packed_state, unpacked_shape):
-                if unpacked_shape is None:
-                    return (packed_state,)
-                batch_size = packed_state.shape[0]
-                i = 0
-                unpacked = []
-                for shape in unpacked_shape:
-                    j = i+math.prod(shape)
-                    unpacked.append(packed_state[:,i:j].reshape(batch_size, *shape))
-                    i = j
-                return unpacked
 
             def training_forward(self, input, clamp_mask=None):
+                #basic idea from here: https://implicit-layers-tutorial.org/deep_equilibrium_models/
                 with torch.no_grad():
                     fp = self(input, clamp_mask=clamp_mask)
-                fp,unpacked_shape = pack(*self.step(*fp)) #packing so that autograd gets engaged properly
+                fp = self.pack(self.step(*fp)) #packing so that autograd gets engaged properly
 
                 fp_in = fp.detach().clone().requires_grad_()
-                fp_out,_ = pack(*self.step(*unpack(fp_in,unpacked_shape)))
+                fp_out,_ = self.pack(self.step(*self.unpack(fp_in)))
                 def backward_hook(grad):
                     new_grad = grad
                     for t in range(1,self.rbp_max_steps+1):
                         new_grad_prev = new_grad
                         new_grad = torch.autograd.grad(fp_out, fp_in, new_grad_prev, retain_graph=True)[0] + grad
-                        rel_res = ((new_grad - new_grad_prev).norm()/new_grad.norm()).item()
-                        if rel_res <= self.rbp_converged_thres:
+                        residual = ((new_grad - new_grad_prev).norm()/new_grad.norm()).item()
+                        if residual <= self.rbp_converged_thres:
                             break
                     if t > self.rbp_max_steps:
-                        print(f'BP not converged: t={t}, res={rel_res}')
+                        print(f'BP not converged: t={t}, res={residual}')
                     return new_grad
                 fp.register_hook(backward_hook)
-                return unpack(fp,unpacked_shape)
+                return self.unpack(fp)
 
         elif self.train_mode == 'rbp-1h':
             def training_forward(input, clamp_mask=None):
@@ -196,11 +225,33 @@ class AssociativeMemory(pl.LightningModule):
         self.training_forward = types.MethodType(training_forward, self)
 
 
+    def get_energy_trajectory(self, batch, debug=False):
+        input, target, perturb_mask = batch[0:3]
+        with torch.no_grad():
+            state_trajectory = self(input, clamp_mask=~perturb_mask, return_mode='trajectory')
+        #[T x ([B,*] ... [B,*])] -> ([T,B,*], ..., [T,B,*])
+        #TODO: store immediately in this format to avoid reshaping? Would need to rewrite other methods
+        state_trajectory = [torch.stack(layer_tr) for layer_tr in zip(*state_trajectory)]
+        return self.energy(*state_trajectory, debug=debug)
+
+
+    def plot_energy_trajectory(self, batch):
+        with torch.no_grad():
+            energy_trajectory = self.get_energy_trajectory(batch) #([T,B,*], ..., [T,B,*])
+
+        fig, ax = plt.subplots()
+        ax.plot(energy_trajectory)
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Energy')
+
+        return fig, ax
+
+
 
 class LargeAssociativeMemory(AssociativeMemory):
     """From Krotov and Hopfield 2020
-    x: [B,N] (feature)
-    y: [B,M] (hidden)
+    g: [B,N] (feature layer firing rate)
+    f: [B,M] (hidden layer firing rate)
     """
     def __init__(self,
                  input_size,
@@ -212,7 +263,7 @@ class LargeAssociativeMemory(AssociativeMemory):
                  tau = 1,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['input_nonlin', 'hidden_nonlin']) #nonlins already saved during checkpoiting b/c instances of nn.Module
 
         self.feature = nc.Layer(input_size, nonlin=input_nonlin, tau=float(tau), dt=self.dt)
         self.fc = nc.LinearNormalized(input_size, hidden_size, normalize_weights=normalize_weights)
@@ -221,9 +272,71 @@ class LargeAssociativeMemory(AssociativeMemory):
         self.rescale_grads = rescale_grads
 
 
+    def default_init(self, input_init, hidden_init=None):
+        if hidden_init is None:
+            hidden_init = self.hidden.default_init(input_init.shape[0]).to(input_init.device)
+        return input_init, hidden_init
+
+
+    def energy(self, g, f, debug=False):
+        """
+        g: [T,B,N] or [B,N] or [N]
+        f: [T,B,M] or [B,M] or [M]
+
+        Change of variables h=W*g and v=W^T*f (see documentation for `step`):
+
+            E = [v   *G(v)    - L_v(v)]    + [h *F(h)  - L_h(h)]  - F(h) *W*G(v) #from KH2020
+              = [W^Tf*G(W^Tf) - L_v(W^Tf)] + [Wg*F(Wg) - L_h(Wg)] - F(Wg)*W*G(W^Tf)
+
+        where G(.) is feature.nonlin and F(.) is hidden.nonlin
+        """
+        #change of variables
+        v = self.fc.T(f) #[T,B,N]
+        h = self.fc(g) #[T,B,M]
+
+        G = self.feature.nonlin(v) #[T,B,N]
+        F = self.hidden.nonlin(h) #[T,B,M]
+
+        # E_feature = self.feature.energy(v)
+        Lv = torch.linalg.vector_norm(v, dim=-1) #[T,B]
+        E_feature = (v*G).sum(dim=-1) - Lv #[T,B]
+
+        # E_hidden = self.hidden.energy(h)
+        beta = self.hidden.nonlin.beta
+        Lh = torch.logsumexp(beta*h, dim=-1)/beta #[T,B]
+        E_hidden = (h*F).sum(dim=-1) - Lh #[T,B]
+
+        # E_syn = self.fc.energy(F, G)
+        #[T,B,1,M]@[M,N]@[T,B,N,1]->[T,B,1,1]->[T,B]
+        E_syn = -(F.unsqueeze(-2) @ self.fc.weight @ G.unsqueeze(-1)).squeeze()
+
+        E = E_feature + E_hidden + E_syn #[T,B]
+        if debug:
+            return E_feature, E_hidden, E_syn, E
+        return E
+
+
+    def plot_energy_trajectory(self, batch, debug=False):
+        if debug:
+            with torch.no_grad(): #([T,B,*], ..., [T,B,*])
+                energy_trajectory = self.get_energy_trajectory(batch, debug=debug)
+
+            fig, ax = plt.subplots(2,2, sharex=True)
+            _ax = ax.flatten()
+            for i, label in enumerate(['$E_{feat}$', '$E_{hid}$', '$E_{syn}$', '$E_{tot}$']):
+                _ax[i].plot(energy_trajectory[i])
+                _ax[i].set_ylabel(label)
+            [_ax[i].set_xlabel('Time') for i in [2,3]]
+            fig.tight_layout()
+            return fig, ax
+
+        return super().plot_energy_trajectory(batch)
+
+
     def _compute_grad_scaling(self):
         """Must be called after backward()"""
-        return self.fc._weight.grad.abs().max(dim=1, keepdim=True)[0] #weight.shape = [hidden_size, input_size]
+        #_weight.shape is [hidden_size, input_size]
+        return self.fc._weight.grad.abs().max(dim=1, keepdim=True)[0]
 
 
     def on_after_backward(self):
@@ -231,19 +344,30 @@ class LargeAssociativeMemory(AssociativeMemory):
         all afferent weights for that neuron) is equal to 1"""
         #TODO: can we move this to self.fc's class to make more general?
         if self.rescale_grads:
-            #weight.shape = [hidden_size, input_size]
             self.fc._weight.grad /= self._compute_grad_scaling()
 
 
-    def step(self, x_prev):
-        y = self.hidden.step(0, self.fc(x_prev))
-        x = self.feature.step(x_prev, self.fc.T(y))
-        return (x,) #wrap in tuple b/c base class requires returning tuple of states
+    def step(self, g_prev, f_prev=None):
+        """
+        dg/dt = -g + G(W^T*f)  <=>  g[t+dt] = (1-dt/tau) g[t] + dt/tau G( W^T*f[t] )
+        df/dt = -f + F(W*g)    <=>  f[t+dt] = (1-dt/tau) f[t] + dt/tau F( W  *g[t] )
+
+        Note that by change of variables h=W*g and v=W^T*f, this is equivalent to:
+            dh/dt = -h + W*G(v)    <=>  h[t+dt] = (1-dt/tau) h[t] + dt/tau W  *G(v)
+            dv/dt = -v + W^T*F(h)  <=>  v[t+dt] = (1-dt/tau) v[t] + dt/tau W^T*F(h)
+
+            W*g[t+dt] = (1-dt/tau) W*g[t] + dt/tau W*G( W^T*f[t] )
+            W^T*f[t+dt] = (1-dt/tau) W^T*f[t] + dt/tau W^T*F( W*g[t] )
+        """
+        #f_prev is ignored because tau_f=0 (included for function signature consistency)
+        f = self.hidden.step(0, self.fc(g_prev))
+        g = self.feature.step(g_prev, self.fc.T(f))
+        return (g,f)
 
 
     @staticmethod
     def infer_input_size(train_data):
-        """train_data: (X,Y) where X is [D,N]"""
+        """train_data: (X,Y) where X is [dataset_size, input_dim]"""
         return {'input_size' : train_data[0][0].numel()}
 
 
@@ -299,24 +423,50 @@ class LargeAssociativeMemory(AssociativeMemory):
 
 class ExceptionsMHN(LargeAssociativeMemory):
     def __init__(self, exceptions, beta=1, beta_exception=None, train_beta=True,
-                 exception_loss_scaling=1, *args, **kwargs):
+                 exception_loss_scaling=1, exception_loss_mode='manual',
+                 *args, **kwargs):
         """
-        exception_loss_scaling: Loss weighting for exceptions is `exception_loss_scaling` times
-            [loss for non-exceptions]. ALl loss weightings are normalized such that they sum to 1.
+        exception_loss_scaling: defines the relative loss weighting for exceptions compared to
+            non-exceptions. ALl loss weightings are normalized such that they sum to 1.
             Remember to run net.set_exception_loss_scaling() after initializing the network!
+        exception_loss_mode:
+            manual: selects exceptions based on known ground truth. Loss weighting for exceptions
+                is `exception_loss_scaling` times the weighting for non-exceptions.
+            entropy: entropy of hidden (softmax) layer. Items with max entropy (i.e. entropy of a
+                discrete uniform distribution with M elements) get scaled proportional
+                to `exception_loss_scaling`, zero entropy gets scaled proportional to `1` with
+                linear interpolation in between
+            max: Items whose max(hidden)==1 get scaled by `exception_loss_scaling`. Items with
+                max(hidden)==1/M get scaled by `1`.
+            norm: norm(hidden)==sqrt(M) gets scaled by `exception_loss_scaling`, norm==1 gets
+                scaled by 1
+            time: number of timesteps to reach the fixed point. time==net.max_steps gets scaled
+                by 'exception_Loss_scaling', time==1 gets scaled by `1`
+
+                #TODO: How to do better? This is bad because
+                    1) max_steps is arbitrary and network might never hit this max
+                    2) time==1 is unlikely, usually smallest number of of steps is ~200-300
+
+            #TODO: possible issue: there's going to be significant interaction between beta and
+                `exc_loss_scaling` because entropy range varies wildly (6.62-6.634 for beta=1)
+                vs (0.5-6.5 for beta=10) in an trained network (all 0's, three 1's, M=100).
+                Same for norm and max.
         """
         assert not train_beta or beta_exception is None, "Can't use dynamic beta if training beta0"
+        kwargs.pop('hidden_nonlin', '') #TODO: hack to get this to load_from_checkpoint. Don't know why hidden_nonlin is in the kwargs in the first place....
         super().__init__(*args, hidden_nonlin=nc.Softmax(beta=beta, train=train_beta), **kwargs)
 
         self.beta_exception = torch.tensor(float(beta_exception)) if beta_exception is not None else None
 
         self.exceptions = set(exceptions)
         self.exception_loss_scaling = exception_loss_scaling
+        self.exception_loss_mode = exception_loss_mode
         #remember to run net.set_exception_loss_scaling() after initializing the network!
 
         self.automatic_optimization = False #must be set *after* calling super().__init__()
 
-
+        self.min_exception_signal = float('inf')
+        self.max_exception_signal = -float('inf')
 
 
     def set_exception_loss_scaling(self, train_data):
@@ -341,6 +491,7 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
 
     def configure_callbacks(self):
+        """Don't use generic OutputsLogger because want to see exceptions in every sample batch"""
         callbacks = super().configure_callbacks()
         for c in callbacks:
             if isinstance(c, cb.OutputsLogger):
@@ -378,11 +529,13 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
 
     def training_step(self, batch, batch_idx):
-        """Using manual optimization so that I can rescale gradients flexibly (other modules use automatic)"""
+        """Using manual optimization so that I can rescale gradients flexibly (other modules use
+        automatic optim). Must set self.automatic_optimization=False in __init__()"""
         input, target, perturb_mask, label = batch
         if isinstance(target, torch.Tensor):
             target = (target,) #output is tuple, make sure target is too
-        output = self.training_forward(input, clamp_mask=~perturb_mask)
+        output, converge_time = self.training_forward(input, clamp_mask=~perturb_mask, return_mode='converge_time')
+        hidden_activation = output[1]
 
         opt = self.optimizers()
         #compute gradients without weighting and store them for use in rescaling
@@ -401,10 +554,11 @@ class ExceptionsMHN(LargeAssociativeMemory):
                     input[is_exception], clamp_mask=~perturb_mask[is_exception])[0]
 
         #manually compute gradients, optionally rescale, and step the optimizer
-        #TODO: don't re-run this if there are no exceptions in the batch, since unweighted_loss
-        #is same as loss (and the same as loss_reg)
+        #TODO: don't re-run this with 'unweighted_loss' grad scaling if there are no exceptions in
+        #the batch, since unweighted_loss is same as loss (and the same as loss_reg)
         opt.zero_grad()
-        loss, loss_reg, loss_exc = self.loss_fn_exceptions(output, target, is_exception)
+        loss, loss_reg, loss_exc = self.loss_fn_exceptions(output, target, is_exception,
+                                                           hidden_activation, converge_time)
         self.manual_backward(loss)
         if self.rescale_grads == 'unweighted_loss':
             self.fc._weight.grad /= unweighted_grad_scaling
@@ -418,6 +572,8 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
         self.log('train/loss', loss.item())
         if loss_reg is not None and loss_exc is not None:
+            print(f'[exception] it={self.global_step}, ep={self.current_epoch}, bx={batch_idx}, '
+                  f'loss={loss:.4e}, loss_exc={loss_exc:.4e}, loss_reg={loss_reg:.4e}')
             self.log('train/loss_exception', loss_exc.item())
             self.log('train/loss_regular', loss_reg.item())
 
@@ -426,21 +582,84 @@ class ExceptionsMHN(LargeAssociativeMemory):
         return {'output': tuple(o.detach() for o in output)}
 
 
-    def loss_fn_exceptions(self, output, target, is_exception):
+    def loss_fn_exceptions(self, output, target, is_exception=None, hidden_activation=None,
+                           converge_time=None):
         output, target = output[0], target[0] #unpack length-1 state tuple
 
-        weights = torch.ones(output.shape[0])
-        weights[is_exception] = self.exception_loss_scaling
-        weights = weights/sum(weights)
+        with torch.no_grad():
+            if self.exception_loss_mode == 'manual':
+                weights = torch.ones(output.shape[0]) #[B]
+                weights[is_exception] = self.exception_loss_scaling
+            elif self.exception_loss_mode == 'entropy':
+                exception_signal = nc.entropy(hidden_activation)
+            elif self.exception_loss_mode == 'max':
+                exception_signal = -hidden_activation.max(dim=1)[0] #negative bc large max -> small loss
+            elif self.exception_loss_mode == 'norm':
+                exception_signal = -hidden_activation.norm(dim=1) #same
+            elif self.exception_loss_mode == 'time':
+                exception_signal = converge_time
+
+            if self.exception_loss_mode != 'manual':
+                #Turn `exception_signal` into (unnormalized) `weights`. We've already set `weights` if
+                #we're in manual mode so only do this for the other modes
+                if exception_signal.max() > self.max_exception_signal:
+                    self.max_exception_signal = exception_signal.max()
+                if exception_signal.min() < self.min_exception_signal:
+                    self.min_exception_signal = exception_signal.min()
+
+                #rescale to [0,1], relative to the min/max exception_signal that's ever been seen
+                if self.max_exception_signal == self.min_exception_signal:
+                    exception_signal = torch.ones_like(exception_signal)
+                else:
+                    exception_signal -= self.min_exception_signal
+                    exception_signal /= (self.max_exception_signal-self.min_exception_signal)
+
+                #rescale to [1, exc_loss_scaling]
+                weights = exception_signal*(self.exception_loss_scaling-1) + 1
+
+            weights = weights/sum(weights) #normalize to sum to 1
 
         loss_per_item = F.mse_loss(output, target, reduction='none').mean(1)
         loss_exc = loss_reg = None
-        if is_exception.any():
-            loss_exc = loss_per_item[is_exception].mean()
-            loss_reg = loss_per_item[~is_exception].mean()
+        if is_exception is not None and is_exception.any():
+            #TODO: just reweight loss_exc and loss_reg instead of each item individually if manual mode
+            loss_exc = loss_per_item[is_exception].sum()
+            loss_reg = loss_per_item[~is_exception].sum()
         loss = (weights*loss_per_item).sum()
 
         return loss, loss_reg, loss_exc
+
+
+    def get_hidden_trajectory(self, batch, select_neurons=None):
+        input, target, perturb_mask = batch[0:3]
+        with torch.no_grad():
+            state_trajectory = self(input, clamp_mask=~perturb_mask, return_mode='trajectory') #[T x ([B,N],[B,M])]
+
+        hidden_trajectory = torch.stack([state[1] for state in state_trajectory]) #[T,B,M]
+        if select_neurons is not None:
+            hidden_trajectory = hidden_trajectory[:,:,select_neurons]
+        return hidden_trajectory
+
+
+    def plot_hidden_trajectory(self, batch, select_neurons=None):
+        hidden_trajectory = self.get_hidden_trajectory(batch, select_neurons) #[T,B,M]
+        n_hidden_units = hidden_trajectory.shape[-1]
+        if select_neurons is None:
+            select_neurons = range(n_hidden_units)
+        fig, ax = plt.subplots(*plots.length_to_rows_cols(n_hidden_units), sharex=True, sharey=True)
+        for i in range(n_hidden_units):
+            ax.flat[i].plot(hidden_trajectory[:,:,i])
+            # ax[i].set_title(f'neuron {select_neurons[i]}')
+            ax.flat[i].axis('off')
+        ax[-1,0].axis('on')
+        ax[-1,0].spines['top'].set_visible(False)
+        ax[-1,0].spines['right'].set_visible(False)
+        ax[-1,0].set_xlabel('time')
+        ax[-1,0].set_ylabel('softmax($h_\mu$)')
+        fig.set_size_inches(7.12, 7.12)
+        fig.tight_layout()
+        return fig, ax
+
 
 
 class ConvThreeLayer(AssociativeMemory):
@@ -459,7 +678,7 @@ class ConvThreeLayer(AssociativeMemory):
 
         self.conv = nc.Conv2d(x_channels, y_channels, kernel_size, stride)
         self.fcr = nc.Reshape(nc.Linear(math.prod(self.y.shape), z_size),
-                           (math.prod(self.y.shape),))
+                             (math.prod(self.y.shape),))
 
 
     def default_init(self, x_init, y_init=None):
@@ -472,11 +691,13 @@ class ConvThreeLayer(AssociativeMemory):
         return super().configure_callbacks() + [cb.WeightsLogger(self.sparse_log_factor)]
 
 
-    def step(self, x_prev, y_prev):
+    def step(self, x_prev, y_prev, z_prev=None):
+        #z_prev is ignored because tau_z=0 (included for function signature consistency)
         z = self.z.step(0, self.fcr(y_prev))
         y = self.y.step(y_prev, self.fcr.T(z)+self.conv(x_prev)) #use z not z_prev since tau_z=0
         x = self.x.step(x_prev, self.conv.T(y_prev))
-        return x, y
+        return x,y,z
+
 
     @staticmethod
     def infer_input_size(train_data):
@@ -504,21 +725,6 @@ class ConvThreeLayer(AssociativeMemory):
         fig, ax = plots.plot_matrix(grid, title=title)
         return fig, ax
 
-
-class Hierarchical(AssociativeMemory):
-    def __init__(self, layers, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        assert len(layers) > 1
-        self.layers = layers
-        self.num_layers = len(layers)
-
-    def default_init(self, *init_state):
-        raise NotImplementedError() #TODO
-
-    def step(self, *prev_state):
-        for i in range(self.num_layers):
-            raise NotImplementedError() #TODO
 
 
 

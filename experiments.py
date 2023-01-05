@@ -1,4 +1,7 @@
 from copy import deepcopy
+
+import numpy as np
+
 import networks
 import data
 import components as nc
@@ -61,9 +64,10 @@ exceptions_mhn_config.update({
     'train_beta': True,
     'exceptions': None,
     'exception_loss_scaling': 1, #int, 'linear_data'
+    'exception_loss_mode': 'manual', #manual, entropy, max, norm, time
     'rescale_grads': False, #True, False, 'unweighted_loss'
-
 })
+
 
 conv_net_config = deepcopy(base_net_config)
 conv_net_config.update({
@@ -184,8 +188,32 @@ class AssociativeMNIST_Exceptions(Experiment):
 
     deltaconfigs = {'net.beta': [1, 10],
                     'net.train_beta': [False, True],
-                    'net.rescale_grads': ['unweighted_loss'], #[True, False]
+                    'net.rescale_grads': [True, False, 'unweighted_loss'],
                     'net.exception_loss_scaling': [2000, 100, 10, 1],
+                    }
+
+
+
+class AssociativeMNIST_Exceptions_Automatic(AssociativeMNIST_Exceptions):
+    from components import Softmax, Identity, Spherical
+    baseconfig = deepcopy(AssociativeMNIST_Exceptions.baseconfig)
+    baseconfig.update({'net.train_beta': False})
+
+    deltaconfigs = {'net.beta': [1, 10],
+                    'net.exception_loss_scaling': [1,10,100,2000,5000,10000],
+                    'net.exception_loss_mode': ['manual', 'entropy', 'max', 'norm', 'time'],
+                    }
+
+
+
+class AssociativeMNIST_Exceptions_TrainBeta(AssociativeMNIST_Exceptions):
+    from components import Softmax, Identity, Spherical
+    baseconfig = deepcopy(AssociativeMNIST_Exceptions.baseconfig)
+    baseconfig.update({'net.train_beta': True})
+
+    deltaconfigs = {'net.beta': np.linspace(0.1, 20, 20),
+                    'net.rescale_grads': [False],
+                    'net.exception_loss_scaling': [100, 10, 1],
                     }
 
 

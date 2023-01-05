@@ -22,7 +22,7 @@ class Printer(Callback):
                 string += f', loss={loss:.4e}'
             if 'train/acc' in trainer.callback_metrics:
                 acc = trainer.callback_metrics['train/acc'].item()
-                string += f', acc={acc}'
+                string += f', acc={acc:.2f}'
             print(string)
 
 
