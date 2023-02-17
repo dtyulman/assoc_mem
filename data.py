@@ -105,20 +105,28 @@ class AssociativeDataset(Dataset):
         return grid
 
 
-    def plot_batch(self, num_samples=100, inputs=None, targets=None, outputs=None,
-                   ax_rows=1, cbar='shared', **kwargs):
-        if inputs is None and targets is None:
-            inputs, targets = next(iter(DataLoader(self, batch_size=num_samples, shuffle=True)))[0:2]
+    def plot_batch(self, num_samples=None, ax=None, ax_rows=1, cbar='shared', **kwargs):
+        """
+        plot_batch(num_samples=B):
+            plots inputs and targets for randomly drawn size B batch
+        plot_batch(Input=input, Target=target, ..., Kwarg=tensor) or
+        plot_batch(**{'Input':input, 'Target':target, 'Key':value})
+            plots each kwarg assuming it's a batch, using the key as the title
 
-        named_batches = {'Inputs': inputs, 'Targets': targets, 'Outputs': outputs}
+        ax, ax_rows and cbar get passed to plots.plot_matrices()
+        """
+        named_batches = {}
+        if num_samples is not None:
+            inputs, targets = next(iter(DataLoader(self, batch_size=num_samples, shuffle=True)))[0:2]
+            named_batches.update({'Inputs': inputs, 'Targets': targets})
+
         named_batches.update(**kwargs)
         grids, titles = [], []
         for title, batch in named_batches.items():
-            if batch is not None:
-                grids.append(self.batch_to_grid(batch.cpu()))
-                titles.append(title)
+            grids.append(self.batch_to_grid(batch.cpu()))
+            titles.append(title)
 
-        return plots.plot_matrices(grids, titles, ax_rows=ax_rows, cbar=cbar)
+        return plots.plot_matrices(grids, titles, ax=ax, ax_rows=ax_rows, cbar=cbar)
 
 
 

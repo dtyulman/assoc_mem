@@ -13,11 +13,17 @@ import components as nc
 
 
 class AssociativeMemory(pl.LightningModule):
-    def __init__(self, dt=1., converged_thres=0, max_steps=100, warn_not_converged=True,
+    def __init__(self, dt=1., converged_thres=1e-8, max_steps=100, warn_not_converged=True,
+                 converge_mode='max', #max, batch
                  input_mode = 'init', #init, clamp
                  train_kwargs={'mode':'bptt'},
                  optimizer_kwargs={'class':'Adam'},
                  sparse_log_factor=5):
+        """
+        converge_mode: how to evaluate convergence to fixed-point
+            'max': consider relative residual for each item, run until each of them has converged
+            'batch': consider relative residual for the entire batch as a single vector
+        """
         super().__init__()
         self.save_hyperparameters(ignore=['sparse_log_factor', 'warn_not_converged'])
 
@@ -27,6 +33,8 @@ class AssociativeMemory(pl.LightningModule):
         self.max_steps = max_steps
         self.converged_thres = converged_thres
         self.warn_not_converged = warn_not_converged
+        assert converge_mode in ['max', 'batch'], 'Invalid converge_mode'
+        self.converge_mode = converge_mode
 
         self.sparse_log_factor = sparse_log_factor
         self.setup_training_step(**train_kwargs)
@@ -41,11 +49,13 @@ class AssociativeMemory(pl.LightningModule):
         init_state: list of initial states for each layer in network. Set list entry
             to None to use the Layer default. At least one entry must be provided.
         clamp_mask: same shape as init_state[0], selects which entries of the state to clamp
-        return_mode: list of options to return, can include all/any
+        return_mode: list of options to return, can include all/any of:
             'trajectory': returns entire trajectory of the state evolution from init to fixed-point
             'converge_time': returns iteration at which each item in the batch converged
         """
         state = self.default_init(*init_state)
+
+        clamp_values = None
         if 'clamp' in self.input_mode and clamp_mask is not None:
             #TODO: this assumes state[0] is the (perturbed) "input". In general might be
             # any/some/all of the entries in the state tuple
@@ -57,19 +67,20 @@ class AssociativeMemory(pl.LightningModule):
             converge_time = torch.ones(state[0].shape[0])*self.max_steps+1
         for t in range(1,self.max_steps+1):
             prev_state = state
-            state = self.step(*prev_state)
-            if 'clamp' in self.input_mode and clamp_mask is not None:
-                state[0][clamp_mask] = clamp_values #TODO: same as above
+            state = self.step(*prev_state, clamp_mask=clamp_mask, clamp_values=clamp_values)
 
+            #optionally compute/store additional things to return
             if 'trajectory' in return_mode:
                 state_trajectory.append(state)
-            if 'converge_time' in return_mode:
+            if 'converge_time' in return_mode or self.converge_mode == 'max':
                 residual_per_item = self.get_residual(state, prev_state, batch_avg=False)
+            if 'converge_time' in return_mode:
                 converge_time[(converge_time==self.max_steps+1) & (residual_per_item<=self.converged_thres)] = t
 
-            if 'converge_time' in return_mode:
+            #check convergence
+            if self.converge_mode == 'max':
                 residual = residual_per_item.max()
-            else:
+            elif self.converge_mode == 'batch':
                 residual = self.get_residual(state, prev_state)
             if residual <= self.converged_thres:
                 break
@@ -129,7 +140,7 @@ class AssociativeMemory(pl.LightningModule):
         return init_state
 
 
-    def step(self, *prev_state):
+    def step(self, *prev_state, clamp_mask=None, clamp_values=None):
         """Override. Returns next state (tuple of tensors)"""
         raise NotImplementedError()
 
@@ -225,14 +236,19 @@ class AssociativeMemory(pl.LightningModule):
         self.training_forward = types.MethodType(training_forward, self)
 
 
-    def get_energy_trajectory(self, batch, debug=False):
+    def get_energy_trajectory(self, batch, state_trajectory=None, debug=False):
+        """Must provde either batch, which runs the network and generates the state_trajectory,
+        or state_trajectory directly, from which the energy gets computed"""
         input, target, perturb_mask = batch[0:3]
-        with torch.no_grad():
-            state_trajectory = self(input, clamp_mask=~perturb_mask, return_mode='trajectory')
+        clamp_mask = ~perturb_mask
+        if state_trajectory is None:
+            with torch.no_grad():
+                state_trajectory = self(input, clamp_mask=clamp_mask, return_mode='trajectory')
+
         #[T x ([B,*] ... [B,*])] -> ([T,B,*], ..., [T,B,*])
         #TODO: store immediately in this format to avoid reshaping? Would need to rewrite other methods
         state_trajectory = [torch.stack(layer_tr) for layer_tr in zip(*state_trajectory)]
-        return self.energy(*state_trajectory, debug=debug)
+        return self.energy(*state_trajectory, clamp_mask=clamp_mask, debug=debug)
 
 
     def plot_energy_trajectory(self, batch):
@@ -250,69 +266,77 @@ class AssociativeMemory(pl.LightningModule):
 
 class LargeAssociativeMemory(AssociativeMemory):
     """From Krotov and Hopfield 2020
-    g: [B,N] (feature layer firing rate)
+    g: [B,N] (visible layer firing rate)
     f: [B,M] (hidden layer firing rate)
     """
     def __init__(self,
-                 input_size,
+                 visible_size,
                  hidden_size,
-                 input_nonlin = nc.Identity(),
+                 visible_nonlin = nc.Identity(),
                  hidden_nonlin = nc.Softmax(),
                  rescale_grads = False,
                  normalize_weights = False, #False, frobenius (or 'F' or True), rows, rows_scaled
                  tau = 1,
                  *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.save_hyperparameters(ignore=['input_nonlin', 'hidden_nonlin']) #nonlins already saved during checkpoiting b/c instances of nn.Module
+        kwargs.pop('input_size', '') #for backwards compatibility
+        kwargs.pop('input_nonlin', '') #for backwards compatibility
 
-        self.feature = nc.Layer(input_size, nonlin=input_nonlin, tau=float(tau), dt=self.dt)
-        self.fc = nc.LinearNormalized(input_size, hidden_size, normalize_weights=normalize_weights)
+        super().__init__(*args, **kwargs)
+        self.save_hyperparameters(ignore=['visible_nonlin', 'hidden_nonlin']) #nonlins already saved during checkpointing b/c instances of nn.Module
+
+        self.visible = nc.Layer(visible_size, nonlin=visible_nonlin, tau=float(tau), dt=self.dt)
+        self.fc = nc.LinearNormalized(visible_size, hidden_size, normalize_weights=normalize_weights)
         self.hidden = nc.Layer(hidden_size, nonlin=hidden_nonlin, tau=0, dt=self.dt)
 
         self.rescale_grads = rescale_grads
 
 
-    def default_init(self, input_init, hidden_init=None):
-        if hidden_init is None:
-            hidden_init = self.hidden.default_init(input_init.shape[0]).to(input_init.device)
-        return input_init, hidden_init
+    def default_init(self, visible_init, hidden_init=None):
+        if hidden_init is None and self.hidden.tau > 0:
+            hidden_init = self.hidden.default_init(visible_init.shape[0]).to(visible_init.device)
+        elif self.hidden.tau == 0:
+            assert hidden_init is None, 'Do not initialize hidden layer if tau==0'
+            hidden_init = self.hidden.nonlin(self.fc(visible_init))
+        return visible_init, hidden_init
 
 
-    def energy(self, g, f, debug=False):
+    def energy(self, g, f, clamp_mask=None, debug=False):
         """
         g: [T,B,N] or [B,N] or [N]
         f: [T,B,M] or [B,M] or [M]
 
         Change of variables h=W*g and v=W^T*f (see documentation for `step`):
 
-            E = [v   *G(v)    - L_v(v)]    + [h *F(h)  - L_h(h)]  - F(h) *W*G(v) #from KH2020
+            E = [v   *G(v)    - L_v(v)]    + [h *F(h)  - L_h(h)]  - F(h) *W*G(v) #from KH2021
               = [W^Tf*G(W^Tf) - L_v(W^Tf)] + [Wg*F(Wg) - L_h(Wg)] - F(Wg)*W*G(W^Tf)
 
-        where G(.) is feature.nonlin and F(.) is hidden.nonlin
+        where G(.) is visible.nonlin and F(.) is hidden.nonlin
         """
         #change of variables
         v = self.fc.T(f) #[T,B,N]
         h = self.fc(g) #[T,B,M]
 
-        G = self.feature.nonlin(v) #[T,B,N]
+        #energy computation
+        G = self.visible.nonlin(v) #[T,B,N]
         F = self.hidden.nonlin(h) #[T,B,M]
 
-        # E_feature = self.feature.energy(v)
-        Lv = torch.linalg.vector_norm(v, dim=-1) #[T,B]
-        E_feature = (v*G).sum(dim=-1) - Lv #[T,B]
+        J = 0
+        if 'clamp' in self.input_mode and clamp_mask is not None:
+            assert any([isinstance(self.visible.nonlin, nl) for nl in nc.ELEMENTWISE_NONLINS]), \
+                'Energy only defined with clamped input units if elementwise nonlinearity'
+            J = self.fc(g*clamp_mask) #[T,B,M]
+            G[:,clamp_mask] = 0
+            v[:,clamp_mask] = float('nan')
+            E_visible = torch.nansum(v*G, dim=-1) - self.visible.nonlin.L(v)
+        else:
+            E_visible = self.visible.energy(v)
 
-        # E_hidden = self.hidden.energy(h)
-        beta = self.hidden.nonlin.beta
-        Lh = torch.logsumexp(beta*h, dim=-1)/beta #[T,B]
-        E_hidden = (h*F).sum(dim=-1) - Lh #[T,B]
+        E_hidden = self.hidden.energy(h, J)
+        E_syn = self.fc.energy(G,F)
 
-        # E_syn = self.fc.energy(F, G)
-        #[T,B,1,M]@[M,N]@[T,B,N,1]->[T,B,1,1]->[T,B]
-        E_syn = -(F.unsqueeze(-2) @ self.fc.weight @ G.unsqueeze(-1)).squeeze()
-
-        E = E_feature + E_hidden + E_syn #[T,B]
+        E = E_visible + E_hidden + E_syn #[T,B]
         if debug:
-            return E_feature, E_hidden, E_syn, E
+            return E_visible, E_hidden, E_syn, E
         return E
 
 
@@ -335,7 +359,7 @@ class LargeAssociativeMemory(AssociativeMemory):
 
     def _compute_grad_scaling(self):
         """Must be called after backward()"""
-        #_weight.shape is [hidden_size, input_size]
+        #_weight.shape is [hidden_size, visible_size]
         return self.fc._weight.grad.abs().max(dim=1, keepdim=True)[0]
 
 
@@ -347,28 +371,31 @@ class LargeAssociativeMemory(AssociativeMemory):
             self.fc._weight.grad /= self._compute_grad_scaling()
 
 
-    def step(self, g_prev, f_prev=None):
+    def step(self, g_prev, f_prev, clamp_mask=None, clamp_values=None):
         """
-        dg/dt = -g + G(W^T*f)  <=>  g[t+dt] = (1-dt/tau) g[t] + dt/tau G( W^T*f[t] )
-        df/dt = -f + F(W*g)    <=>  f[t+dt] = (1-dt/tau) f[t] + dt/tau F( W  *g[t] )
+        tau dg/dt = -g + G(W^T*f)  <=>  g[t+dt] = (1-dt/tau) g[t] + dt/tau G( W^T*f[t] )
+        tau df/dt = -f + F(W*g)    <=>  f[t+dt] = (1-dt/tau) f[t] + dt/tau F( W  *g[t] )
 
         Note that by change of variables h=W*g and v=W^T*f, this is equivalent to:
-            dh/dt = -h + W*G(v)    <=>  h[t+dt] = (1-dt/tau) h[t] + dt/tau W  *G(v)
-            dv/dt = -v + W^T*F(h)  <=>  v[t+dt] = (1-dt/tau) v[t] + dt/tau W^T*F(h)
+            tau dh/dt = -h + W*G(v)    <=>  h[t+dt] = (1-dt/tau) h[t] + dt/tau W  *G(v)
+            tau dv/dt = -v + W^T*F(h)  <=>  v[t+dt] = (1-dt/tau) v[t] + dt/tau W^T*F(h)
 
             W*g[t+dt] = (1-dt/tau) W*g[t] + dt/tau W*G( W^T*f[t] )
             W^T*f[t+dt] = (1-dt/tau) W^T*f[t] + dt/tau W^T*F( W*g[t] )
         """
-        #f_prev is ignored because tau_f=0 (included for function signature consistency)
-        f = self.hidden.step(0, self.fc(g_prev))
-        g = self.feature.step(g_prev, self.fc.T(f))
-        return (g,f)
+        # g_ss = self.visible.nonlin(self.fc.T(f_prev))
+        # g = (1-self.visible.eta)*g_prev + self.visible.eta*g_ss
+        # f = self.hidden.nonlin(self.fc(g))
+
+        g = self.visible.step(g_prev, self.fc.T(f_prev), clamp_mask, clamp_values)
+        f = self.hidden.step(0, self.fc(g))
+        return g,f
 
 
     @staticmethod
     def infer_input_size(train_data):
         """train_data: (X,Y) where X is [dataset_size, input_dim]"""
-        return {'input_size' : train_data[0][0].numel()}
+        return {'visible_size' : train_data[0][0].numel()}
 
 
     def plot_weights(self, weights='weights', drop_last=0, pad_nan=True):
@@ -418,6 +445,123 @@ class LargeAssociativeMemory(AssociativeMemory):
                     self.trainer.logger.experiment.add_figure('_grads/_weight', fig,
                                                          global_step=self.global_step)
 
+
+    def get_hidden_trajectory(self, batch, select_neurons=None):
+        input, target, perturb_mask = batch[0:3]
+        with torch.no_grad():
+            state_trajectory = self(input, clamp_mask=~perturb_mask, return_mode='trajectory') #[T x ([B,N],[B,M])]
+
+        hidden_trajectory = torch.stack([state[1] for state in state_trajectory]) #[T,B,M]
+        if select_neurons is not None:
+            hidden_trajectory = hidden_trajectory[:,:,select_neurons]
+        return hidden_trajectory
+
+
+    def plot_hidden_trajectory(self, batch, select_neurons=None):
+        hidden_trajectory = self.get_hidden_trajectory(batch, select_neurons) #[T,B,M]
+        n_hidden_units = hidden_trajectory.shape[-1]
+        if select_neurons is None:
+            select_neurons = range(n_hidden_units)
+        fig, ax = plt.subplots(*plots.length_to_rows_cols(n_hidden_units), sharex=True, sharey=True)
+        for i in range(n_hidden_units):
+            ax.flat[i].plot(hidden_trajectory[:,:,i])
+            # ax[i].set_title(f'neuron {select_neurons[i]}')
+            ax.flat[i].axis('off')
+        ax[-1,0].axis('on')
+        ax[-1,0].spines['top'].set_visible(False)
+        ax[-1,0].spines['right'].set_visible(False)
+        ax[-1,0].set_xlabel('time')
+        ax[-1,0].set_ylabel('softmax($h_\mu$)')
+        fig.set_size_inches(7.12, 7.12)
+        fig.tight_layout()
+        return fig, ax
+
+
+
+class LargeAssociativeMemoryWithCurrents(LargeAssociativeMemory):
+    """
+    if state_mode == 'currents':
+        visible = v, hidden = h (total current into layer)
+
+        Init:
+            1. v[0] init
+            2. h[0] = W*G(v[0]) b/c tau_h==0
+        Loop:
+            3. v[t+1] = (1-dt/tau) v[t] + dt/tau W^T*F(h[t])
+                      = (1-dt/tau) v[t] + dt/tau W^T*F(W*G(v[t])) b/c h[t+1] = W*G(v[t+1])
+            4. h[t+1] = W*G(v[t+1])
+
+    elif state_mode == 'rates':
+        visible = g, hidden = f (firing rate of layer)
+
+        Init:
+            1. g[0] init
+            2. f[0] = F(W*g[0]) because tau_f==0
+        Loop:
+            3. g[t+1] = (1-dt/tau) g[t] + dt/tau G(W^T * f[t])
+                      = (1-dt/tau) g[t] + dt/tau G(W^T * F(W*g[t])) b/c f[t+1] = F(W*g[t+1])
+            4. f[t+1] = F(W*g[t+1])
+    """
+    def __init__(self, dynamics_mode='', *args, **kwargs):
+        self.dynamics_mode = dynamics_mode
+        super().__init__(*args, **kwargs)
+
+
+    def default_init(self, visible_init, hidden_init=None):
+        hidden_init = self.fc(self.visible.nonlin(visible_init))
+        return visible_init, hidden_init
+
+
+    def step(self, v_prev, h_prev, clamp_mask=None, clamp_values=None):
+        f_prev = self.hidden.nonlin(h_prev)
+        if self.dynamics_mode == 'grad_v' or self.dynamics_mode == 'norm_grad_v':
+            assert isinstance(self.visible.nonlin, nc.Spherical) \
+                and isinstance(self.hidden.nonlin, nc.Softmax), \
+                'Grad dynamics only implemented for Spherical-Softmax net'
+
+            #step dynamics
+            g_prev = self.visible.nonlin(v_prev)
+            hgT = (h_prev.unsqueeze(-1) @ g_prev.unsqueeze(-2)) #[B,M,1]@[B,1,N]->[B,M,N]
+            weight_new = self.fc.weight - hgT
+            v_ss = (weight_new.transpose(-2,-1) @ f_prev.unsqueeze(-1)).squeeze(-1) #[B,N,M]@[B,M,1]->[B,N,1]
+            if self.dynamics_mode == 'norm_grad_v':
+                v = v_prev + self.visible.eta*v_ss
+            elif self.dynamics_mode == 'grad_v':
+                v = v_prev + self.visible.eta*v_ss/v_prev.norm(dim=-1, keepdim=True)
+
+            #clamp as needed
+            if 'clamp' in self.input_mode and clamp_mask is not None:
+                v[clamp_mask] = clamp_values
+
+        else:
+            v = self.visible.step(v_prev, self.fc.T(f_prev), clamp_mask, clamp_values)
+
+        h = self.fc(self.visible.nonlin(v))
+        return v, h
+
+
+    def energy(self, v, h, clamp_mask=None, debug=False):
+        #clamp mask is ignored, included for function signature compatibility
+
+        if not debug \
+        and isinstance(self.visible.nonlin, nc.Spherical) \
+        and isinstance(self.hidden.nonlin, nc.Softmax):
+            #this is equivalent special case but much less noisy due to numerical errors
+            E = -torch.logsumexp(self.hidden.nonlin.beta * h, dim=-1)/self.hidden.nonlin.beta
+            return E
+
+        #with exception of the change-of-vars this is the same as the 'rates' energy
+        G = self.visible.nonlin(v) #[T,B,N]
+        F = self.hidden.nonlin(h) #[T,B,M]
+
+        E_visible = self.visible.energy(v)
+        E_hidden = self.hidden.energy(h)
+        E_syn = self.fc.energy(G,F)
+
+        E = E_visible + E_hidden + E_syn #[T,B]
+        if debug:
+            return E_visible, E_hidden, E_syn, E
+        return E
 
 
 
@@ -517,7 +661,7 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
             with plots.NonInteractiveContext():
                 fig, ax = self.trainer.train_dataloader.dataset.datasets \
-                            .plot_batch(inputs=input, targets=target, outputs=output)
+                            .plot_batch(**{'Input':input, 'Target':target, 'Output':output})
             self.trainer.logger.experiment.add_figure('sample_batch', fig,
                                                  global_step=self.trainer.global_step)
 
@@ -579,6 +723,9 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
         self.log('train/acc', acc.item())
 
+        self.log('exception_signal/min', self.min_exception_signal)
+        self.log('exception_signal/max', self.max_exception_signal)
+
         return {'output': tuple(o.detach() for o in output)}
 
 
@@ -619,6 +766,7 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
             weights = weights/sum(weights) #normalize to sum to 1
 
+
         loss_per_item = F.mse_loss(output, target, reduction='none').mean(1)
         loss_exc = loss_reg = None
         if is_exception is not None and is_exception.any():
@@ -628,37 +776,6 @@ class ExceptionsMHN(LargeAssociativeMemory):
         loss = (weights*loss_per_item).sum()
 
         return loss, loss_reg, loss_exc
-
-
-    def get_hidden_trajectory(self, batch, select_neurons=None):
-        input, target, perturb_mask = batch[0:3]
-        with torch.no_grad():
-            state_trajectory = self(input, clamp_mask=~perturb_mask, return_mode='trajectory') #[T x ([B,N],[B,M])]
-
-        hidden_trajectory = torch.stack([state[1] for state in state_trajectory]) #[T,B,M]
-        if select_neurons is not None:
-            hidden_trajectory = hidden_trajectory[:,:,select_neurons]
-        return hidden_trajectory
-
-
-    def plot_hidden_trajectory(self, batch, select_neurons=None):
-        hidden_trajectory = self.get_hidden_trajectory(batch, select_neurons) #[T,B,M]
-        n_hidden_units = hidden_trajectory.shape[-1]
-        if select_neurons is None:
-            select_neurons = range(n_hidden_units)
-        fig, ax = plt.subplots(*plots.length_to_rows_cols(n_hidden_units), sharex=True, sharey=True)
-        for i in range(n_hidden_units):
-            ax.flat[i].plot(hidden_trajectory[:,:,i])
-            # ax[i].set_title(f'neuron {select_neurons[i]}')
-            ax.flat[i].axis('off')
-        ax[-1,0].axis('on')
-        ax[-1,0].spines['top'].set_visible(False)
-        ax[-1,0].spines['right'].set_visible(False)
-        ax[-1,0].set_xlabel('time')
-        ax[-1,0].set_ylabel('softmax($h_\mu$)')
-        fig.set_size_inches(7.12, 7.12)
-        fig.tight_layout()
-        return fig, ax
 
 
 
@@ -691,11 +808,11 @@ class ConvThreeLayer(AssociativeMemory):
         return super().configure_callbacks() + [cb.WeightsLogger(self.sparse_log_factor)]
 
 
-    def step(self, x_prev, y_prev, z_prev=None):
+    def step(self, x_prev, y_prev, z_prev=None, clamp_mask=None, clamp_values=None):
         #z_prev is ignored because tau_z=0 (included for function signature consistency)
         z = self.z.step(0, self.fcr(y_prev))
         y = self.y.step(y_prev, self.fcr.T(z)+self.conv(x_prev)) #use z not z_prev since tau_z=0
-        x = self.x.step(x_prev, self.conv.T(y_prev))
+        x = self.x.step(x_prev, self.conv.T(y_prev), clamp_mask, clamp_values)
         return x,y,z
 
 
@@ -733,65 +850,96 @@ class ConvThreeLayer(AssociativeMemory):
 ###############
 if __name__ == '__main__':
     from torch.utils.data import TensorDataset, DataLoader
+#%%
+    for B in [1,2,16]:
+        for visible_nonlin in [nc.Identity(), nc.Spherical()]:
+            for hidden_nonlin in [nc.Polynomial(2), nc.Polynomial(3), nc.Softmax()]:
+                B = 16
+                N = 50
+                M = 100
+                net1 = LargeAssociativeMemory(N,M, visible_nonlin=visible_nonlin, hidden_nonlin=hidden_nonlin)
+                net2 = LargeAssociativeMemoryWithCurrents(visible_size=N,hidden_size=M,
+                                                          visible_nonlin=visible_nonlin,
+                                                          hidden_nonlin=hidden_nonlin,
+                                                          state_mode='rates')
+                net2.fc._weight.data = net1.fc._weight.data.clone()
 
-    def make_net(net_type, train_mode):
-        if net_type == 'conv':
-            B = 4
-            x_size = 10
-            x_channels = 2
-            train_data = TensorDataset(torch.rand(B, x_channels, x_size, x_size),
-                                       torch.rand(B, x_channels, x_size, x_size),
-                                       torch.rand(B, x_channels, x_size, x_size).round().bool())
-            net = ConvThreeLayer(x_size, x_channels, y_channels=3, kernel_size=3, z_size=10,
-                                 train_kwargs={'mode':train_mode}, converged_thres=1e-7)
-        elif net_type == 'large':
-            B = 64
-            N = 100
-            M = 500
-            train_data = TensorDataset(torch.rand(B,N),
-                                       torch.rand(B,N),
-                                       torch.rand(B,N).round().bool())
-            net = LargeAssociativeMemory(N, M, train_kwargs={'mode':train_mode},
-                                         converged_thres=1e-7)
-        return net, train_data
+                batch = (torch.rand(B,N),
+                         torch.rand(B,N),
+                         torch.rand(B,N).round().bool(),
+                         torch.randint(10, (B,)))
+
+                with torch.no_grad():
+                    E1 = net1.get_energy_trajectory(batch)
+                    E2 = net2.get_energy_trajectory(batch)
+
+                assert E1.shape[1] == B
+                if E1.isnan().any():
+                    print(f'NaN warning... in:{visible_nonlin}, hid:{hidden_nonlin}')
+                    assert (E1[~E1.isnan()]==E2[~E2.isnan()]).all(), f'in:{visible_nonlin}, hid:{hidden_nonlin}'
+                else:
+                    assert E1.allclose(E2), f'in:{visible_nonlin}, hid:{hidden_nonlin}'
+
+#%%
+    # def make_net(net_type, train_mode):
+    #     if net_type == 'conv':
+    #         B = 4
+    #         x_size = 10
+    #         x_channels = 2
+    #         train_data = TensorDataset(torch.rand(B, x_channels, x_size, x_size),
+    #                                    torch.rand(B, x_channels, x_size, x_size),
+    #                                    torch.rand(B, x_channels, x_size, x_size).round().bool())
+    #         net = ConvThreeLayer(x_size, x_channels, y_channels=3, kernel_size=3, z_size=10,
+    #                              train_kwargs={'mode':train_mode}, converged_thres=1e-7)
+    #     elif net_type == 'large':
+    #         B = 64
+    #         N = 100
+    #         M = 500
+    #         train_data = TensorDataset(torch.rand(B,N),
+    #                                    torch.rand(B,N),
+    #                                    torch.rand(B,N).round().bool())
+    #         net = LargeAssociativeMemory(N, M, train_kwargs={'mode':train_mode},
+    #                                      converged_thres=1e-7)
+    #     return net, train_data
 
 
-    def train(net, train_data):
-        train_loader = DataLoader(train_data, batch_size=len(train_data), shuffle=False)
-        timer = pl.callbacks.Timer()
-        printer = cb.Printer()
-        print(f'\nStarting {net.__class__.__name__} ({net.train_mode})')
-        trainer = pl.Trainer(max_steps=1,
-                             logger=False,
-                             enable_model_summary=False,
-                             enable_progress_bar=False,
-                             enable_checkpointing=False,
-                             callbacks=[timer, printer],
-                             # profiler='advanced',
-                              )
-        trainer.fit(net, train_loader)
-        print(f'Time elapsed ({net.train_mode}): {timer.time_elapsed("train")}\n')
+    # def train(net, train_data):
+    #     train_loader = DataLoader(train_data, batch_size=len(train_data), shuffle=False)
+    #     timer = pl.callbacks.Timer()
+    #     printer = cb.Printer()
+    #     print(f'\nStarting {net.__class__.__name__} ({net.train_mode})')
+    #     trainer = pl.Trainer(max_steps=1,
+    #                          logger=False,
+    #                          enable_model_summary=False,
+    #                          enable_progress_bar=False,
+    #                          enable_checkpointing=False,
+    #                          callbacks=[timer, printer],
+    #                          # profiler='advanced',
+    #                           )
+    #     trainer.fit(net, train_loader)
+    #     print(f'Time elapsed ({net.train_mode}): {timer.time_elapsed("train")}\n')
 
 
-    def compare_grads(net1, net2):
-        assert type(net1)==type(net2)
-        for (name1, param1), (name2, param2) in zip(net1.named_parameters(), net2.named_parameters()):
-            assert name1 == name2
-            if param1.requires_grad and param2.requires_grad:
-                grad1 = param1.grad
-                grad2 = param2.grad
-                assert grad1 is not None and grad2 is not None
-                err = (grad1-grad2).abs().max().item()
-                allclose = torch.allclose(grad1, grad2)
-                print(f'{name1}.grad: max_abs_err={err}, allclose={allclose}')
+    # def compare_grads(net1, net2):
+    #     assert type(net1)==type(net2)
+    #     for (name1, param1), (name2, param2) in zip(net1.named_parameters(), net2.named_parameters()):
+    #         assert name1 == name2
+    #         if param1.requires_grad and param2.requires_grad:
+    #             grad1 = param1.grad
+    #             grad2 = param2.grad
+    #             assert grad1 is not None and grad2 is not None
+    #             err = (grad1-grad2).abs().max().item()
+    #             allclose = torch.allclose(grad1, grad2)
+    #             print(f'{name1}.grad: max_abs_err={err}, allclose={allclose}')
 
 
-    seed = torch.randint(1, 4294967295, (1,)).item() #upper bound is numpy's max seed
-    for net_type in ['conv', 'large']:
-        nets = []
-        for train_mode in ['rbp', 'bptt']:
-            pl.seed_everything(seed)
-            net, train_data = make_net(net_type, train_mode)
-            train(net, train_data)
-            nets.append(net)
-        compare_grads(*nets)
+    # seed = torch.randint(1, 4294967295, (1,)).item() #upper bound is numpy's max seed
+    # for net_type in ['conv', 'large']:
+    #     nets = []
+    #     for train_mode in ['rbp', 'bptt']:
+    #         pl.seed_everything(seed)
+    #         net, train_data = make_net(net_type, train_mode)
+    #         train(net, train_data)
+    #         nets.append(net)
+    #     compare_grads(*nets)
+#%%

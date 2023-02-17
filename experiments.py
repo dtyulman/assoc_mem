@@ -45,9 +45,9 @@ base_net_config = cfg.Config({
 large_assoc_mem_config = deepcopy(base_net_config)
 large_assoc_mem_config.update({
     'class': networks.LargeAssociativeMemory,
-    'input_size': None, #if None, infer from dataset
+    'visible_size': None, #if None, infer from dataset
     'hidden_size': 25,
-    'input_nonlin': nc.Identity(),
+    'visible_nonlin': nc.Identity(),
     'hidden_nonlin': nc.Softmax(beta=1, train=True),
     'rescale_grads': False, #True, False
     'normalize_weights': False,
@@ -149,6 +149,7 @@ class DefaultExperiment(Experiment):
         })
 
 
+
 class AssociativeMNIST_Exceptions(Experiment):
     from components import Softmax, Identity, Spherical
 
@@ -170,7 +171,7 @@ class AssociativeMNIST_Exceptions(Experiment):
 
     _net_config = deepcopy(exceptions_mhn_config)
     _net_config.update({
-        'input_nonlin': Spherical(),
+        'visible_nonlin': Spherical(),
         'normalize_weights': 'rows',
         'beta_exception': None,
         'exceptions': [1],
@@ -201,7 +202,7 @@ class AssociativeMNIST_Exceptions_Automatic(AssociativeMNIST_Exceptions):
 
     deltaconfigs = {'net.beta': [1, 10],
                     'net.exception_loss_scaling': [1,10,100,2000,5000,10000],
-                    'net.exception_loss_mode': ['manual', 'entropy', 'max', 'norm', 'time'],
+                    'net.exception_loss_mode': ['entropy', 'max', 'norm', 'time', 'manual'],
                     }
 
 
@@ -229,8 +230,6 @@ class AssociativeMNIST_Exceptions_TwoBeta(AssociativeMNIST_Exceptions):
                     }
 
 
-
-
 class AssociativeMNIST_Baseline_Clamped_Normalized(Experiment):
     from components import Softmax, Identity, Spherical
 
@@ -256,7 +255,7 @@ class AssociativeMNIST_Baseline_Clamped_Normalized(Experiment):
         'dt': .05,
         'input_mode': 'clamp',
         'hidden_size': 100,
-        'input_nonlin': Spherical(),
+        'visible_nonlin': Spherical(),
         'hidden_nonlin': Softmax(beta=1, train=False),
         'tau': 1.,
         })
@@ -267,7 +266,7 @@ class AssociativeMNIST_Baseline_Clamped_Normalized(Experiment):
         'data': _data_config,
         })
 
-    deltaconfigs = {'net.input_nonlin': [Identity(), Spherical()],
+    deltaconfigs = {'net.visible_nonlin': [Identity(), Spherical()],
                     'net.hidden_nonlin': [Softmax(0.1, train=True),
                                           Softmax(1, train=True),
                                           Softmax(10, train=True),
@@ -277,11 +276,14 @@ class AssociativeMNIST_Baseline_Clamped_Normalized(Experiment):
                     }
 
 
+
+
+
 class AssociativeMNIST_Baseline_Clamped_Normalized_NormalizedWeight(
         AssociativeMNIST_Baseline_Clamped_Normalized):
     from components import Softmax, Identity, Spherical
     baseconfig = deepcopy(AssociativeMNIST_Baseline_Clamped_Normalized.baseconfig)
-    deltaconfigs = {'net.input_nonlin': [Identity(), Spherical()],
+    deltaconfigs = {'net.visible_nonlin': [Identity(), Spherical()],
                     'net.hidden_nonlin': [Softmax(0.1, train=True),
                                           Softmax(1, train=True),
                                           Softmax(10, train=True),
@@ -298,7 +300,7 @@ class AssociativeMNIST_Baseline_RectPoly_Normalized(AssociativeMNIST_Baseline_Cl
     from components import Softmax, Identity, Spherical, RectifiedPoly
 
     deltaconfigs = {'net.input_mode': ['init', 'clamp'],
-                    'net.input_nonlin': [Identity(), Spherical()],
+                    'net.visible_nonlin': [Identity(), Spherical()],
                     'net.hidden_nonlin': [RectifiedPoly(n=2),
                                           RectifiedPoly(n=3),
                                           RectifiedPoly(n=5),
@@ -317,7 +319,7 @@ class AssociativeMNIST_Baseline_RectPoly(AssociativeMNIST_Baseline_RectPoly_Norm
     baseconfig.update({'data.normalize': False})
 
     deltaconfigs = {'net.input_mode': ['init', 'clamp'],
-                    'net.input_nonlin': [Identity()],
+                    'net.visible_nonlin': [Identity()],
                     'net.hidden_nonlin': [RectifiedPoly(n=2),
                                           # RectifiedPoly(n=3),
                                           # RectifiedPoly(n=5),

@@ -9,7 +9,7 @@ REMOTE_SYNC_SERVER = 'dt2586@motion.rcs.columbia.edu'
 REMOTE_PATH = '/burg/theory/users/dt2586/assoc_mem' #'/burg/home/dt2586/assoc_mem' #
 
 #%%select experiment and trials
-experiment = experiments.AssociativeMNIST_Exceptions()
+experiment = experiments.LargeAssociativeMemory_EnergyDebug()
 trials = f'1-{len(experiment)}' #default, all trials
 
 #%%generate submit.sh file
@@ -53,9 +53,11 @@ ssh_sbatch = f'ssh {REMOTE_SERVER} "cd {REMOTE_PATH}; sbatch submit.sh; squeue -
 print(f'Batching...\n {ssh_sbatch}')
 subprocess.check_call(ssh_sbatch, shell=True)
 
-#%%
+#%% Check queue
 # subprocess.check_call(f'ssh {REMOTE_SERVER} "squeue -u {USERNAME}"', shell=True)
 
+#%% Cancel all
+# subprocess.check_call(f'ssh {REMOTE_SERVER} "scancel -u {USERNAME}"', shell=True)
 
 #%%run tensorboard on remote, port forward, and open in browser
 # ssh_tensorboard = '' #TODO

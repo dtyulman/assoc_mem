@@ -1,4 +1,4 @@
-import math
+import math, warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,7 +21,7 @@ class Softmax(nn.Softmax):
         with torch.no_grad():
             self.beta = self.softplus(self._beta)
 
-    def __str__(self):
+    def __repr__(self):
         return f'Softmax(beta={self.beta:g}{", train=True" if self._beta.requires_grad else ""})'
 
     def forward(self, input):
@@ -30,6 +30,7 @@ class Softmax(nn.Softmax):
 
     def L(self, input):
         """Lagrangian. f(x)_i = dL/dx_i"""
+        input = nan2minf(input)
         return torch.logsumexp(self.beta*input, self.dim)/self.beta #default: [B,*,N]->[B,*]
 
 
@@ -43,7 +44,7 @@ class Spherical(nn.Module):
             raise NotImplementedError('Not tested')
         self.centering = centering
 
-    def __str__(self):
+    def __repr__(self):
         if self.centering:
             return f'Spherical(centering={self.centering})'
         return 'Spherical()'
@@ -58,17 +59,35 @@ class Spherical(nn.Module):
 
     def L(self, input):
         """f(x)_i = dL/dx_i"""
+        input = nan2zero(input)
         return torch.linalg.vector_norm(input, dim=self.dim) #default:[B,*,N]->[B,*]
+
+
+class Sigmoid(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.softplus = nn.Softplus()
+
+    def __repr__(self):
+        return 'Sigmoid()'
+
+    def forward(self, input):
+        return torch.sigmoid(input)
+
+    def L(self, input):
+        input = nan2minf(input)
+        return self.softplus(input).sum(dim=-1)
 
 
 class Identity(nn.Module):
     def forward(self, input):
-        return input
+        #clone in case downstream does in-place op on f(x), which should not change x
+        return input.clone()
 
-    # def L(self, x):
-    #     """L = 1/2 x^T*x --> dL/dx_i = x_i"""
-    #     xx = x.transpose(-2,-1) @ x #[B,M,1]->[B,1,1] or #[M,1]->[1,1]
-    #     return 0.5*xx.squeeze(-2) #[B,1,1]->[B,1] or #[1,1]->[1]
+    def L(self, input):
+        """L = 1/2 x^T*x --> dL/dx_i = x_i"""
+        input = nan2zero(input)
+        return torch.pow(input,2).sum(dim=-1)/2 #[T,B,N]/[B,N]/[N] -> [T,B]/[B]/[1]
 
 
 class Polynomial(nn.Module):
@@ -76,8 +95,16 @@ class Polynomial(nn.Module):
         super().__init__()
         self.n = nn.Parameter(torch.tensor(int(n)), requires_grad=False)
 
+    def __repr__(self):
+        return f'Polynomial(n={self.n}{", train=True" if self.n.requires_grad else ""})'
+
     def forward(self, input):
         return torch.pow(input, self.n)
+
+    def L(self, input):
+        """L =  1/(n+1) \sum_i x_i^n+1 --> dL/dx_i = x_i^n"""
+        input = nan2zero(input)
+        return torch.pow(input, self.n+1).sum(dim=-1)/(self.n+1) #[T,B,N]/[B,N]/[N] -> [T,B]/[B]/[1]
 
 
 class RectifiedPoly(nn.Module):
@@ -85,22 +112,26 @@ class RectifiedPoly(nn.Module):
         super().__init__()
         self.n = nn.Parameter(torch.tensor(float(n)), requires_grad=train)
 
+    def __repr__(self):
+        return f'RectifiedPoly(n={self.n}{", train=True" if self.n.requires_grad else ""})'
+
     def forward(self, input):
         return torch.pow(torch.relu(input), self.n)
 
-    def __str__(self):
-        return f'RectifiedPoly(n={self.n}{", train=True" if self.n.requires_grad else ""})'
+
+ELEMENTWISE_NONLINS = (Sigmoid, Identity, Polynomial, RectifiedPoly)
 
 
 #########
 # Layer #
 #########
 class Layer(nn.Module):
-    def __init__(self, *shape, nonlin=Identity(), tau=1, dt=1):
+    def __init__(self, *shape, nonlin=Identity(), state_mode='rates', tau=1, dt=1):
         super().__init__()
 
         self.shape = shape
         self.nonlin = nonlin
+        self.state_mode = state_mode
 
         assert dt<=tau or tau==0
         self.tau = float(tau)
@@ -113,31 +144,54 @@ class Layer(nn.Module):
         else:
             raise ValueError(f'Invalid initialization mode: {mode}')
 
-    def step(self, prev_state, total_input):
+    def step(self, prev_state, total_input, clamp_mask=None, clamp_values=None):
         """
-        Applies nonlinearity f(.) and takes a single (discretized) step of the dynamics
-            tau*df/dt = -f(t) + f( W*x(t) ) i.e.
-            f(t+dt) = (1-dt/tau)*f(t) + dt/tau f( W*g(t) )
+        if state_mode == 'rates':
+            Applies nonlinearity F(.) and takes a single (discretized) step of the dynamics
+                tau*df/dt = -f(t) + F(W*g(t))
+                i.e. f(t+dt) = (1-dt/tau) f(t) + dt/tau F(W*g(t))
 
-        state f(t+dt) and prev_state f(t) are firing rates (post-nonlin) of this layer
-        total_input W*g(t) is the input currents (sum of scaled firing rates of all afferent neurons)
+            state f(t+dt) and prev_state f(t) are firing rates (post-nonlin) of this layer
+            total_input W*g(t)+I is the input currents (sum of scaled firing rates of all afferent neurons)
+
+        elif state_mode == 'currents':
+            tau*dx/dt = -x(t) + W*G(y(t))
+            i.e. x(t+dt) = (1-dt/tau) x(t) + dt/tau W*G(y(t))
+
+            state x(t+dt) and prev_state x(t) are currents (pre-nonlin)
+            total_input W*G(y(t))+I as above, but note that you'll need to apply the other layer's nonlin first
         """
-        steady_state = self.nonlin(total_input)
+        if self.state_mode == 'rates':
+            steady_state = self.nonlin(total_input)
+        elif self.state_mode == 'currents':
+            steady_state = total_input
+
         state = (1-self.eta)*prev_state + self.eta*steady_state
+        if clamp_mask is not None and clamp_values is not None:
+            state[clamp_mask] = clamp_values
         return state
 
-    def energy(self, input):
-        """
-        input x is shape [B,*]
 
-        E = x^T*f(x) - L(x), where f_i(x) = dL/dx_i
+    def energy(self, input, external=0):
         """
-        raise NotImplementedError('Not tested')
-        # activation = self.nonlin(input) #[B, *self.shape]
-        # lagrangian = self.nonlin.L(input) #[B]
-        # dims = tuple(range(1,len(self.shape)+1))
-        # E = (activation*input).sum(dim=dims) - lagrangian
-        # return E
+        input x is [T,B,*self.shape] e.g [T,B,N] or [T,B,C,L,L]
+         or [B,*self.shape] e.g [B,N] or [B,C,L,L]
+         or [*self.shape] e.g [N] or [C,L,L]
+
+        E = (x-I)^T * f(x) - L(x), where f_i(x) = dL/dx_i and I is external input current
+        """
+
+        assert external is 0 or external.shape==input.shape #noqa
+
+        activation = self.nonlin(input)
+        lagrangian = self.nonlin.L(input)
+
+        n_layer_dims = len(self.shape)
+        n_input_dims = len(input.shape)
+        layer_dims = tuple(range(n_input_dims-n_layer_dims, n_input_dims))
+
+        E = ((input-external)*activation).nansum(dim=layer_dims) - lagrangian
+        return E
 
 
 #################################
@@ -165,22 +219,20 @@ class Linear(nn.Module):
 
     def energy(self, pre, post):
         """
-        pre g=g(v) is presynaptic firing rate, shape [T,B,N]
-        post f=f(h) is postsynaptic firing rate, shape [T,B,M]
+        pre g=g(v) is presynaptic firing rate, shape [T,B,N] or [B,N] or [N]
+        post f=f(h) is postsynaptic firing rate, shape [T,B,M] or [B,M] or [M]
         self.weight is shape [M,N]
 
         E = -g^T W f
         """
-        raise NotImplementedError('Not tested')
         # [T,B,1,M]@[M,N]@[T,B,N,1]->[T,B,1,1]->[T,B]. Note this is backwards because self.weight
-        # is stored as [input_dim, output_dim] following Pytorch convention
-        E = -(pre.unsqueeze(-2) @ self.weight @ pre.unsqueeze(-1)).squeeze()
-        return E #[T,B]
+        # is stored as [input_dim, output_dim] following pytorch convention
+        return -(post.unsqueeze(-2) @ self.weight @ pre.unsqueeze(-1)).squeeze(-1).squeeze(-1) #[T,B]
 
 
 class LinearNormalized(nn.Module):
     def __init__(self, input_size, output_size, normalize_weights=False):
-        #TODO: subclass Linear(), or remove it enturely and use the normalize=False default
+        #TODO: subclass Linear(), or remove it entirely and use the normalize=False default
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
@@ -218,9 +270,18 @@ class LinearNormalized(nn.Module):
         self.normalize_weights()
         return F.linear(input, self.weight.t())
 
-    def energy(self, input):
+    def energy(self, pre, post):
         #TODO: remove after subclassing Linear()
-        raise NotImplementedError()
+        """
+        pre g=g(v) is presynaptic firing rate, shape [T,B,N] or [B,N] or [N]
+        post f=f(h) is postsynaptic firing rate, shape [T,B,M] or [B,M] or [M]
+        self.weight is shape [M,N]
+
+        E = -g^T W f
+        """
+        # [T,B,1,M]@[M,N]@[T,B,N,1]->[T,B,1,1]->[T,B]. Note this is backwards because self.weight
+        # is stored as [input_dim, output_dim] following pytorch convention
+        return -(post.unsqueeze(-2) @ self.weight @ pre.unsqueeze(-1)).squeeze(-1).squeeze(-1) #[T,B]
 
 
 class Conv2d(nn.Conv2d):
@@ -287,7 +348,17 @@ def softplus_inv(x, beta=1, threshold=20):
 
 
 def entropy(x):
-    """x.shape = [B,N]. Every row must sum to 1."""
-    assert (x>0).all()
-    assert torch.allclose(x.sum(dim=1), torch.ones(x.shape[0])) #allclose to allow for numerical error
+    """x.shape = [B,N]"""
+    assert (x>0).all(), 'All entries must be positive'
+    assert torch.allclose(x.sum(dim=1), torch.ones(x.shape[0])), 'Every row must sum to 1' #allclose to allow for numerical error
     return -(x*torch.log2(x)).sum(dim=1)
+
+def nan2minf(x):
+    x = x.clone()
+    x[x.isnan()] = -float('inf')
+    return x
+
+def nan2zero(x):
+    x = x.clone()
+    x[x.isnan()] = 0
+    return x

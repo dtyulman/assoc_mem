@@ -82,6 +82,6 @@ class OutputsLogger(SparseLogger):
                 #TODO: this assumes state[0] is the "output". In general might be any/some/all of
                 #the entries in the state tuple
                 fig, ax = trainer.train_dataloader.dataset.datasets \
-                            .plot_batch(inputs=input, targets=target, outputs=outputs['output'][0])
+                            .plot_batch(**{'Input':input, 'Target':target, 'Output':outputs['output'][0]})
             trainer.logger.experiment.add_figure('sample_batch', fig,
                                                  global_step=trainer.global_step)
