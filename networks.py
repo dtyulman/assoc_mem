@@ -729,13 +729,11 @@ class ExceptionsMHN(LargeAssociativeMemory):
         return {'output': tuple(o.detach() for o in output)}
 
 
-    def loss_fn_exceptions(self, output, target, is_exception=None, hidden_activation=None,
-                           converge_time=None):
-        output, target = output[0], target[0] #unpack length-1 state tuple
-
+    def compute_loss_weights(self, is_exception=None, hidden_activation=None, converge_time=None):
         with torch.no_grad():
             if self.exception_loss_mode == 'manual':
-                weights = torch.ones(output.shape[0]) #[B]
+                batch_size = is_exception.shape[0]
+                weights = torch.ones(batch_size) #[B]
                 weights[is_exception] = self.exception_loss_scaling
             elif self.exception_loss_mode == 'entropy':
                 exception_signal = nc.entropy(hidden_activation)
@@ -762,20 +760,29 @@ class ExceptionsMHN(LargeAssociativeMemory):
                     exception_signal /= (self.max_exception_signal-self.min_exception_signal)
 
                 #rescale to [1, exc_loss_scaling]
-                weights = exception_signal*(self.exception_loss_scaling-1) + 1
+                # weights = exception_signal*(self.exception_loss_scaling-1) + 1
+                weights = torch.exp(math.log(self.exception_loss_scaling)*exception_signal)
+
 
             weights = weights/sum(weights) #normalize to sum to 1
+            return weights
 
+
+    def loss_fn_exceptions(self, output, target, is_exception=None, hidden_activation=None, converge_time=None):
+        output, target = output[0], target[0] #unpack state tuple
 
         loss_per_item = F.mse_loss(output, target, reduction='none').mean(1)
+        weights = self.compute_loss_weights(is_exception, hidden_activation, converge_time)
+        loss = (weights*loss_per_item).sum()
+
         loss_exc = loss_reg = None
         if is_exception is not None and is_exception.any():
             #TODO: just reweight loss_exc and loss_reg instead of each item individually if manual mode
             loss_exc = loss_per_item[is_exception].sum()
             loss_reg = loss_per_item[~is_exception].sum()
-        loss = (weights*loss_per_item).sum()
 
         return loss, loss_reg, loss_exc
+
 
 
 

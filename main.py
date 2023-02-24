@@ -18,7 +18,8 @@ assert args.trial is None or args.trial >= 1
 if args.experiment is not None: #eg. running from CLI/batchscript
     expt = getattr(experiments, args.experiment)()
 else: #default (eg. for running from IDE)
-    expt = experiments.AssociativeMNIST_Exceptions()
+    expt = experiments.AssociativeMNIST_Exceptions_Automatic()
+    args.trial = None
 
 #initialize directory for saving if doesn't exist
 if expt.baseconfig['train.save_logs']:

@@ -9,7 +9,7 @@ REMOTE_SYNC_SERVER = 'dt2586@motion.rcs.columbia.edu'
 REMOTE_PATH = '/burg/theory/users/dt2586/assoc_mem' #'/burg/home/dt2586/assoc_mem' #
 
 #%%select experiment and trials
-experiment = experiments.LargeAssociativeMemory_EnergyDebug()
+experiment = experiments.AssociativeMNIST_Exceptions_Automatic()
 trials = f'1-{len(experiment)}' #default, all trials
 
 #%%generate submit.sh file
