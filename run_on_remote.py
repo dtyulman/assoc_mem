@@ -10,6 +10,7 @@ REMOTE_PATH = '/burg/theory/users/dt2586/assoc_mem' #'/burg/home/dt2586/assoc_me
 
 #%%select experiment and trials
 experiment = experiments.AssociativeMNIST_Exceptions_Automatic()
+experiment_name = f'{experiment.__class__.__name__}'
 trials = f'1-{len(experiment)}' #default, all trials
 
 #%%generate submit.sh file
@@ -25,13 +26,14 @@ submit_sh = f"""#!/bin/sh
 #SBATCH --mem-per-cpu={mem}gb
 #SBATCH --time={time}
 #SBATCH --array={trials}
-#SBATCH --job-name={experiment.__class__.__name__}
+#SBATCH --job-name={experiment_name}
 #SBATCH --output=slurm/slurm_%x_%a_%A.out
 
 [[ ! -d slurm ]] && mkdir slurm
-echo Queueing experiment {experiment.__class__.__name__}, trial $SLURM_ARRAY_TASK_ID
-srun python -u main.py -e {experiment.__class__.__name__} -t $SLURM_ARRAY_TASK_ID
+echo Queueing experiment {experiment_name}, trial $SLURM_ARRAY_TASK_ID
+srun python -u main.py -e {experiment_name} -t $SLURM_ARRAY_TASK_ID
 """
+
 #TODO: `mkdir slurm` doesn't work, had make it manually instead. Would actually be better to
 # store the output logs under results/<yyyy-mm-dd>/<experiment_name>/<trial_label> but that folder
 # isn't created until after main.py is executed, but needs to already exist before
@@ -52,6 +54,13 @@ subprocess.check_call(rsync, shell=True)
 ssh_sbatch = f'ssh {REMOTE_SERVER} "cd {REMOTE_PATH}; sbatch submit.sh; squeue -u {USERNAME}"'
 print(f'Batching...\n {ssh_sbatch}')
 subprocess.check_call(ssh_sbatch, shell=True)
+
+
+#%% Check log
+# subprocess.check_call(f'ssh {REMOTE_SERVER} "ls -t {REMOTE_PATH}/slurm/"', shell=True)
+
+# LOG_FILE = 'slurm_AssociativeMNIST_Exceptions_Automatic_35_5504012.out'
+# subprocess.check_call(f'ssh {REMOTE_SERVER} "cat {REMOTE_PATH}/slurm/{LOG_FILE}"', shell=True)
 
 #%% Check queue
 # subprocess.check_call(f'ssh {REMOTE_SERVER} "squeue -u {USERNAME}"', shell=True)

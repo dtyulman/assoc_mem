@@ -291,6 +291,10 @@ class LargeAssociativeMemory(AssociativeMemory):
         self.rescale_grads = rescale_grads
 
 
+    def initialize_parameters(self):
+        self.fc.initialize_parameters()
+
+
     def default_init(self, visible_init, hidden_init=None):
         if hidden_init is None and self.hidden.tau > 0:
             hidden_init = self.hidden.default_init(visible_init.shape[0]).to(visible_init.device)
@@ -566,7 +570,7 @@ class LargeAssociativeMemoryWithCurrents(LargeAssociativeMemory):
 
 
 class ExceptionsMHN(LargeAssociativeMemory):
-    def __init__(self, exceptions, beta=1, beta_exception=None, train_beta=True,
+    def __init__(self, beta=1, beta_exception=None, train_beta=True,
                  exception_loss_scaling=1, exception_loss_mode='manual',
                  *args, **kwargs):
         """
@@ -602,7 +606,6 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
         self.beta_exception = torch.tensor(float(beta_exception)) if beta_exception is not None else None
 
-        self.exceptions = set(exceptions)
         self.exception_loss_scaling = exception_loss_scaling
         self.exception_loss_mode = exception_loss_mode
         #remember to run net.set_exception_loss_scaling() after initializing the network!
@@ -612,22 +615,18 @@ class ExceptionsMHN(LargeAssociativeMemory):
         self.min_exception_signal = float('inf')
         self.max_exception_signal = -float('inf')
 
+        self.force_plot_next_batch_weights = False
+
 
     def set_exception_loss_scaling(self, train_data):
-        """Run this after initializing the network to set dataset-dependent variables!"""
-        #TODO: write ExceptionsDataset which takes in a Dataset but keeps track of exceptions
-        #and returns with __getitem__() a bool whether it's an exception for use with ExceptionsMHN
-        #as optional ground truth. That way don't need to have this awkward method.
-
-        is_exception = [l.item() in self.exceptions for l in train_data.labels]
-        self.exceptions_idx = [idx for idx,is_ex in enumerate(is_exception) if is_ex]
-        self.num_exceptions = len(self.exceptions_idx) #i.e. sum(is_exception)
-        num_regulars = len(train_data)-self.num_exceptions
+        """Run this after initializing the network to set dataset-dependent variables"""
+        num_exceptions = len(train_data.exceptions_idx)
+        num_regulars = len(train_data) - num_exceptions
 
         if isinstance(self.exception_loss_scaling, (int,float)):
             pass
         elif self.exception_loss_scaling == 'linear_dataset':
-            self.exception_loss_scaling = num_regulars/self.num_exceptions
+            self.exception_loss_scaling = num_regulars/num_exceptions
         elif self.exception_loss_scaling == 'log_dataset':
             raise NotImplementedError
         else:
@@ -637,9 +636,9 @@ class ExceptionsMHN(LargeAssociativeMemory):
     def configure_callbacks(self):
         """Don't use generic OutputsLogger because want to see exceptions in every sample batch"""
         callbacks = super().configure_callbacks()
-        for c in callbacks:
+        for i,c in enumerate(callbacks):
             if isinstance(c, cb.OutputsLogger):
-                del c
+                del callbacks[i]
         return callbacks
 
 
@@ -650,18 +649,18 @@ class ExceptionsMHN(LargeAssociativeMemory):
             output = outputs['output'][0] #unpack tuple, assumes state[0] is the "output"
 
             #replace last `num_exceptions` elements in batch with the exceptions from the dataset
-            input_ex, target_ex, perturb_mask_ex = \
-                self.trainer.train_dataloader.dataset.datasets[self.exceptions_idx][0:3]
+            dataset = self.trainer.train_dataloader.dataset.datasets
+            input_ex, target_ex, perturb_mask_ex = dataset[dataset.exceptions_idx][0:3]
             with torch.no_grad():
                 output_ex = self(input_ex, clamp_mask=~perturb_mask_ex)[0] #unpack tuple
 
-            input[-self.num_exceptions:] = input_ex
-            target[-self.num_exceptions:] = target_ex
-            output[-self.num_exceptions:] = output_ex
+            n_exc = len(dataset.exceptions_idx)
+            input[-n_exc:] = input_ex
+            target[-n_exc:] = target_ex
+            output[-n_exc:] = output_ex
 
             with plots.NonInteractiveContext():
-                fig, ax = self.trainer.train_dataloader.dataset.datasets \
-                            .plot_batch(**{'Input':input, 'Target':target, 'Output':output})
+                fig, ax = dataset.dataset.plot_batch(**{'Input':input, 'Target':target, 'Output':output})
             self.trainer.logger.experiment.add_figure('sample_batch', fig,
                                                  global_step=self.trainer.global_step)
 
@@ -675,7 +674,7 @@ class ExceptionsMHN(LargeAssociativeMemory):
     def training_step(self, batch, batch_idx):
         """Using manual optimization so that I can rescale gradients flexibly (other modules use
         automatic optim). Must set self.automatic_optimization=False in __init__()"""
-        input, target, perturb_mask, label = batch
+        input, target, perturb_mask, label, is_exception = batch
         if isinstance(target, torch.Tensor):
             target = (target,) #output is tuple, make sure target is too
         output, converge_time = self.training_forward(input, clamp_mask=~perturb_mask, return_mode='converge_time')
@@ -690,7 +689,6 @@ class ExceptionsMHN(LargeAssociativeMemory):
             unweighted_grad_scaling = self._compute_grad_scaling()
 
         #optionally re-run network with different beta for exceptions
-        is_exception = torch.tensor([l.item() in self.exceptions for l in label])
         if self.beta_exception is not None and is_exception.any():
             with nc.HotSwapParameter(self.hidden.nonlin.beta, self.beta_exception):
                 #remember to unpack length-1 output state tuple
@@ -732,17 +730,16 @@ class ExceptionsMHN(LargeAssociativeMemory):
     def compute_loss_weights(self, is_exception=None, hidden_activation=None, converge_time=None):
         with torch.no_grad():
             if self.exception_loss_mode == 'manual':
-                batch_size = is_exception.shape[0]
-                weights = torch.ones(batch_size) #[B]
-                weights[is_exception] = self.exception_loss_scaling
+                weights = is_exception*self.exception_loss_scaling
+                weights /= sum(weights)
             elif self.exception_loss_mode == 'entropy':
-                exception_signal = nc.entropy(hidden_activation)
+                exception_signal = -nc.entropy(hidden_activation)
             elif self.exception_loss_mode == 'max':
-                exception_signal = -hidden_activation.max(dim=1)[0] #negative bc large max -> small loss
+                exception_signal = hidden_activation.max(dim=1)[0] #negative bc large max -> small loss
             elif self.exception_loss_mode == 'norm':
-                exception_signal = -hidden_activation.norm(dim=1) #same
+                exception_signal = hidden_activation.norm(dim=1) #same
             elif self.exception_loss_mode == 'time':
-                exception_signal = converge_time
+                exception_signal = -converge_time
 
             if self.exception_loss_mode != 'manual':
                 #Turn `exception_signal` into (unnormalized) `weights`. We've already set `weights` if
@@ -754,17 +751,29 @@ class ExceptionsMHN(LargeAssociativeMemory):
 
                 #rescale to [0,1], relative to the min/max exception_signal that's ever been seen
                 if self.max_exception_signal == self.min_exception_signal:
-                    exception_signal = torch.ones_like(exception_signal)
+                    exception_signal_normed = torch.ones_like(exception_signal)
                 else:
-                    exception_signal -= self.min_exception_signal
-                    exception_signal /= (self.max_exception_signal-self.min_exception_signal)
+                    exception_signal_normed = exception_signal - self.min_exception_signal
+                    exception_signal_normed /= (self.max_exception_signal-self.min_exception_signal)
 
                 #rescale to [1, exc_loss_scaling]
-                # weights = exception_signal*(self.exception_loss_scaling-1) + 1
-                weights = torch.exp(math.log(self.exception_loss_scaling)*exception_signal)
+                # weights = exception_signal_normed*(self.exception_loss_scaling-1) + 1
+                # weights = weights/sum(weights) #normalize to sum to 1
+
+                weights = torch.softmax(self.exception_loss_scaling*exception_signal_normed, dim=0)
 
 
-            weights = weights/sum(weights) #normalize to sum to 1
+            if is_exception.any() or self.force_plot_next_batch_weights:
+                self.force_plot_next_batch_weights = not self.force_plot_next_batch_weights
+                with plots.NonInteractiveContext():
+                    fig, ax = plt.subplots()
+                    ax.plot(weights)
+                    ax.plot(torch.where(is_exception)[0], weights.max()*torch.ones(is_exception.sum()), ls='', marker='o')
+                    ax.set_xlabel('Batch item')
+                    ax.set_ylabel('Loss weighting')
+                    self.trainer.logger.experiment.add_figure('loss_weighting', fig,
+                                                         global_step=self.trainer.global_step)
+
             return weights
 
 

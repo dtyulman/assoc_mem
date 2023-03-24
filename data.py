@@ -5,6 +5,23 @@ from torch.utils.data import Dataset, DataLoader
 
 import plots
 
+
+class ExceptionsDataset(Dataset):
+    def __init__(self, dataset, exceptions):
+        self.dataset = dataset
+        self.exceptions = set(exceptions)
+        self.is_exception = torch.tensor([l.item() in self.exceptions for l in dataset.labels])
+        self.exceptions_idx = [idx for idx, is_ex in enumerate(self.is_exception) if is_ex]
+
+    def __getitem__(self, index):
+        input, target, perturb_mask, label = self.dataset[index]
+        return input, target, perturb_mask, label, self.is_exception[index]
+
+    def __len__(self):
+        return len(self.dataset)
+
+
+
 class AssociativeDataset(Dataset):
     def __init__(self, data, labels=None, perturb_mask='last', perturb_entries=0.5, perturb_value=0):
         self.data = data
@@ -346,6 +363,11 @@ def filter_by_class(data, labels, num_samples=None, select_classes='all', n_per_
 
 def get_data(include_test=False, **kwargs):
     DatasetClass = kwargs.pop('class')
+
+    if DatasetClass is ExceptionsDataset:
+        assert not include_test
+        kwargs = {'dataset': get_data(**kwargs['dataset_config'])[0],
+                  'exceptions': kwargs['exceptions']}
 
     train_data = DatasetClass(**kwargs)
 

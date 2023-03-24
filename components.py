@@ -209,6 +209,9 @@ class Linear(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
+        self.initialize_parameters()
+
+    def initialize_parameters(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5)) #same as nn.Linear
 
     def forward(self, input):
@@ -238,7 +241,7 @@ class LinearNormalized(nn.Module):
         self.output_size = output_size
 
         self._weight = nn.Parameter(torch.empty(output_size, input_size))
-        nn.init.kaiming_uniform_(self._weight, a=math.sqrt(5)) #same as nn.Linear
+        self.initialize_parameters()
 
         self.normalize_mode = normalize_weights
         if self.normalize_mode == 'rows_scaled':
@@ -248,6 +251,11 @@ class LinearNormalized(nn.Module):
         self.register_buffer('weight', torch.empty_like(self._weight))
         with torch.no_grad():
             self.normalize_weights()
+
+
+    def initialize_parameters(self):
+        nn.init.kaiming_uniform_(self._weight, a=math.sqrt(5)) #same as nn.Linear
+
 
     def normalize_weights(self):
         if self.normalize_mode == 'frobenius':

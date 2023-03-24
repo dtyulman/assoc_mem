@@ -56,13 +56,12 @@ large_assoc_mem_config.update({
 
 
 exceptions_mhn_config = deepcopy(large_assoc_mem_config)
-del exceptions_mhn_config['hidden_nonlin'] #hidden must be Softmax
+del exceptions_mhn_config['hidden_nonlin'] #hidden is hard-coded Softmax
 exceptions_mhn_config.update({
     'class': networks.ExceptionsMHN,
     'beta': 1,
     'beta_exception': None, #if None, will use same beta for all inputs
     'train_beta': True,
-    'exceptions': None,
     'exception_loss_scaling': 1, #int, 'linear_data'
     'exception_loss_mode': 'manual', #manual, entropy, max, norm, time
     'rescale_grads': False, #True, False, 'unweighted_loss'
@@ -120,6 +119,15 @@ cifar_config.update({
     })
 
 
+exceptions_dataset_config = cfg.Config({
+    'class': data.ExceptionsDataset,
+    'dataset_config': deepcopy(mnist_config),
+    'exceptions': [1],
+    })
+exceptions_dataset_config['dataset_config']['select_classes'] = [0, 1]
+exceptions_dataset_config['dataset_config']['n_per_class'] = ['all', 3]
+
+
 ###############
 # Experiments #
 ###############
@@ -162,19 +170,14 @@ class AssociativeMNIST_Exceptions(Experiment):
         'sparse_log_factor': 5,
         })
 
-    _data_config = deepcopy(mnist_config)
-    _data_config.update({
-        'select_classes':[0,     1],
-        'n_per_class':   ['all', 3],
-        'normalize': True
-        })
+    _data_config = deepcopy(exceptions_dataset_config)
+    _data_config['dataset_config']['normalize'] = True
 
     _net_config = deepcopy(exceptions_mhn_config)
     _net_config.update({
         'visible_nonlin': Spherical(),
         'normalize_weights': 'rows',
         'beta_exception': None,
-        'exceptions': [1],
         'converged_thres': 1e-6,
         'max_steps': 1000,
         'input_mode': 'clamp',
@@ -201,8 +204,8 @@ class AssociativeMNIST_Exceptions_Automatic(AssociativeMNIST_Exceptions):
     baseconfig.update({'net.train_beta': False})
 
     deltaconfigs = {'net.beta': [1, 10],
-                    'net.exception_loss_scaling': [1,10,100,2000,5000,10000],
-                    'net.exception_loss_mode': ['entropy', 'max', 'norm', 'time', 'manual'],
+                    'net.exception_loss_scaling': [0, 1, 10, 50, 100],
+                    'net.exception_loss_mode': ['entropy', 'max', 'norm', 'time']#, 'manual'],
                     }
 
 

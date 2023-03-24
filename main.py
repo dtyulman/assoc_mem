@@ -15,15 +15,17 @@ args = parser.parse_args()
 assert args.trial is None or args.trial >= 1
 
 #select experiment
+force_new_dir = False
 if args.experiment is not None: #eg. running from CLI/batchscript
     expt = getattr(experiments, args.experiment)()
 else: #default (eg. for running from IDE)
     expt = experiments.AssociativeMNIST_Exceptions_Automatic()
-    args.trial = None
+    args.trial = 16
+    force_new_dir = True
 
 #initialize directory for saving if doesn't exist
 if expt.baseconfig['train.save_logs']:
-    use_existing = args.trial is not None and args.trial >= 2 #1-based indexing
+    use_existing = args.trial is not None and args.trial > 1 and not force_new_dir #1-based indexing
     if use_existing:
         #TODO: fix, this is a hack for running on cluster to give time for the 1st trial's savedir
         #to get initilized since multiple trials launched in parallel, so that subsequent trials
